@@ -1,0 +1,165 @@
+<?php
+
+class EntityFieldQueryExtra extends EntityFieldQuery {
+  // Extra added fields to the query
+  private $addedFields = array();
+  private $addedProperties = array();
+
+  /**
+   * Finishes the query.
+   *
+   * Adds tags, metaData, range and returns the requested list or count.
+   *
+   * @param SelectQuery $select_query
+   *   A SelectQuery which has entity_type, entity_id, revision_id and bundle
+   *   fields added.
+   * @param string $id_key
+   *   Which field's values to use as the returned array keys.
+   *
+   * @return
+   *   See EntityFieldQuery::execute().
+   */
+  function finishQuery($select_query, $id_key = 'entity_id') {
+    // Iterate through all fields. If the query is trying to fetch results
+    // where a field is null, then alter the query to use a LEFT OUTER join.
+    // Otherwise the query will always return 0 results.
+    foreach ($this->fieldConditions as $key => $fieldCondition) {
+      if ($fieldCondition['operator'] == 'IS NULL' && isset($this->fields[$key]['storage']['details']['sql'][FIELD_LOAD_CURRENT])) {
+        $tables =& $select_query->getTables();
+        foreach ($tables as &$table) {
+          $keys = array_keys($this->fields[$key]['storage']['details']['sql'][FIELD_LOAD_CURRENT]);
+          $sql_table = reset($keys);
+          if ($table['table'] == $sql_table) {
+            $table['join type'] = 'LEFT OUTER';
+          }
+        }
+      }
+    }
+
+    // Same as EntityFieldQuery::execute()
+    foreach ($this->tags as $tag) {
+      $select_query->addTag($tag);
+    }
+    foreach ($this->metaData as $key => $object) {
+      $select_query->addMetaData($key, $object);
+    }
+    $select_query->addMetaData('entity_field_query', $this);
+    if ($this->range) {
+      $select_query->range($this->range['start'], $this->range['length']);
+    }
+    if ($this->count) {
+      return $select_query->countQuery()->execute()->fetchField();
+    }
+
+    // Our modifed code.
+    $columns = array();
+    foreach($this->addedFields as $addedField) {
+      $fields = $select_query->getFields();
+      if (!empty($addedField['field_name'])) {
+        // Add field to query.
+        $column = $addedField['field_name'] . '_' . $addedField['column'];
+        $table_name = 'field_data_' . $addedField['field_name'] . $addedField['index'];
+        $select_query->addField($table_name, $column);
+
+        // Change join type if requested to do so.
+        if (!empty($addedField['join_type'])) {
+          $tables =& $select_query->getTables();
+          foreach ($tables as &$table) {
+            if ($table['alias'] == $table_name && !is_null($table['join type'])) {
+              $table['join type'] = $addedField['join_type'];
+            }
+          }
+        }
+      }
+      else {
+        $column = $addedField['column'];
+        $select_query->addField($fields['entity_id']['table'], $column);
+      }
+      $columns[] = $column;
+    }
+    if (!empty($this->addedProperties)) {
+      // Get the entity base table.
+      $entity_info = entity_get_info($this->entityConditions['entity_type']['value']);
+      $base_table = $entity_info['base table'];
+      foreach($this->addedProperties as $column) {
+        // Add property to query.
+        $select_query->addField($base_table, $column);
+        $columns[] = $column;
+      }
+    }
+
+    // Same as EntityFieldQuery::execute() excpet for the foreach.
+    $return = array();
+    foreach ($select_query->execute() as $partial_entity) {
+      $bundle = isset($partial_entity->bundle) ? $partial_entity->bundle : NULL;
+      $entity = entity_create_stub_entity($partial_entity->entity_type, array($partial_entity->entity_id, $partial_entity->revision_id, $bundle));
+      // Add in the additional fields to the entity stub.
+      foreach ($columns as $column_name) {
+        if (isset($partial_entity->{$column_name})) {
+          $entity->{$column_name} = $partial_entity->{$column_name};
+        }
+        else {
+          $entity->{$column_name} = NULL;
+        }
+      }
+      $return[$partial_entity->entity_type][$partial_entity->$id_key] = $entity;
+      $this->ordered_results[] = $partial_entity;
+    }
+    return $return;
+  }
+
+  /**
+   * Add extra field data to the output.
+   *
+   * @param string $field
+   *   Either a field name or a field array.
+   * @param string $column
+   *   A column defined in the hook_field_schema() of this field. entity_id
+   *   and bundle can also be used.
+   * @param string $join_type
+   *   (optional) What type of join to use. Default is INNER.
+   *
+   * @return EntityFieldQuery
+   *   The called object.
+   */
+  public function getFieldValue($field, $column, $join_type = NULL) {
+    // Add field to the main query.
+    if (is_scalar($field)) {
+      $field_definition = field_info_field($field);
+      if (empty($field_definition)) {
+        throw new EntityFieldQueryException(t('Unknown field: @field_name', array('@field_name' => $field)));
+      }
+      $field = $field_definition;
+    }
+    // Save the index used for the new field, for later use in field storage.
+    $index = 0;
+    if (isset($field['storage'])) {
+      $index = count($this->fields);
+      $this->fields[$index] = $field;
+    }
+    // Save data needed in the finishQuery() method.
+    $added_fields = array(
+      'field_name' => $field['field_name'],
+      'column' => $column,
+      'index' => $index,
+      'join_type' => $join_type,
+    );
+    $this->addedFields[] = $added_fields;
+    return $this;
+  }
+
+  /**
+   * Add extra property data to the output.
+   *
+   * @param string $column
+   *   A column defined in the hook_field_schema() of the entity.
+   *
+   * @return EntityFieldQuery
+   *   The called object.
+   */
+  public function getPropertyValue($column) {
+    // Save data needed in the finishQuery() method.
+    $this->addedProperties[] = $column;
+    return $this;
+  }
+}

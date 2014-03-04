@@ -1,1 +1,3 @@
 name = EntityFieldQueryExtra
+description = Extends EntityFieldQuery.
+core = 7.x
