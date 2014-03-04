@@ -117,12 +117,12 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
    *   A column defined in the hook_field_schema() of this field. entity_id
    *   and bundle can also be used.
    * @param string $join_type
-   *   (optional) What type of join to use. Default is INNER.
+   *   (optional) What type of join to use. Default is LEFT.
    *
    * @return EntityFieldQuery
    *   The called object.
    */
-  public function getFieldValue($field, $column, $join_type = NULL) {
+  public function getFieldValue($field, $column, $join_type = 'LEFT') {
     // Add field to the main query.
     if (is_scalar($field)) {
       $field_definition = field_info_field($field);
