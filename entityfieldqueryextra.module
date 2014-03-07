@@ -288,7 +288,22 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
           $entity->{$column_name} = NULL;
         }
       }
-      $return[$entity_type][$partial_entity->$id_key] = $entity;
+      if (!isset($return[$entity_type][$partial_entity->$id_key])) {
+        $return[$entity_type][$partial_entity->$id_key] = $entity;
+      }
+      else {
+        // Handle mutiple delta values.
+        foreach ($entity as $k => $v) {
+          if ($return[$entity_type][$partial_entity->$id_key]->$k != $v) {
+            if (!is_array($return[$entity_type][$partial_entity->$id_key]->$k)) {
+              $temp = $return[$entity_type][$partial_entity->$id_key]->$k;
+              unset($return[$entity_type][$partial_entity->$id_key]->$k);
+              $return[$entity_type][$partial_entity->$id_key]->{$k} = array($temp);
+            }
+            $return[$entity_type][$partial_entity->$id_key]->{$k}[] = $v;
+          }
+        }
+      }
       $this->ordered_results[] = $partial_entity;
     }
     return $return;
