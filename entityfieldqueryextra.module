@@ -172,16 +172,17 @@ function EntityFieldQueryExtra_get_op($property_condition, $key) {
 function EntityFieldQueryExtra_get_args($property_condition, $key) {
   $operator = $property_condition['operator'];
   $value = $property_condition['value'];
+  $col = $property_condition['column'];
 
   $return = '';
   if (is_array($value)) {
     foreach ($value as $k => $v) {
-      $return[] = ":efqe_${key}_${k}";
+      $return[] = ":efqe_${col}_${key}_${k}";
     }
     $return = "(" . implode(', ', $return) . ")";
   }
   else {
-    $return = ":efqe_${key}";
+    $return = ":efqe_${col}_${key}";
   }
   return $return;
 }
@@ -190,15 +191,16 @@ function EntityFieldQueryExtra_get_args($property_condition, $key) {
 function EntityFieldQueryExtra_get_args_values($property_condition, $key) {
   $operator = $property_condition['operator'];
   $value = $property_condition['value'];
+  $col = $property_condition['column'];
 
   $return = array();
   if (is_array($value)) {
     foreach ($value as $k => $v) {
-      $return[":efqe_${key}_${k}"] = $v;
+      $return[":efqe_${col}_${key}_${k}"] = $v;
     }
   }
   else {
-    $return = array(":efqe_${key}" => $value);
+    $return = array(":efqe_${col}_${key}" => $value);
   }
   return $return;
 }
