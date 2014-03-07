@@ -62,6 +62,9 @@ function EntityFieldQueryExtra_field_sql_storage_field_storage_query(EntityField
       $select_query->distinct();
     }
   }
+  if (empty($second_table_alias)) {
+    $second_table_alias = $table_alias;
+  }
 
   // Add field conditions. We need a fresh grouping cache.
   drupal_static_reset('_field_sql_storage_query_field_conditions');
@@ -94,8 +97,20 @@ function EntityFieldQueryExtra_field_sql_storage_field_storage_query(EntityField
       $entity_base_table = $query->changeBaseTable;
     }
     $query->entityConditions['entity_type']['operator'] = '=';
-    foreach ($query->propertyConditions as $property_condition) {
-      $query->addCondition($select_query, "$entity_base_table." . $property_condition['column'], $property_condition);
+    foreach ($query->propertyConditions as $key => $property_condition) {
+      // Handle user roles.
+      if ($property_condition['column'] == 'rolename') {
+        // Direct join is faster than a select join.
+        $select_query->join('users_roles', 'users_roles' . $key, "users_roles$key.uid = $entity_base_table.uid");
+        $select_query->join('role', 'role' . $key, "role$key.rid = users_roles$key.rid AND role$key.name " . EntityFieldQueryExtra_get_op($property_condition) . EntityFieldQueryExtra_get_args($property_condition, $key), EntityFieldQueryExtra_get_args_values($property_condition, $key));
+      }
+      elseif ($property_condition['column'] == 'rid') {
+        // Direct join is faster than a select join.
+        $select_query->join('users_roles', 'users_roles' . $key, "users_roles$key.uid = $entity_base_table.uid AND users_roles$key.rid " . EntityFieldQueryExtra_get_op($property_condition) . EntityFieldQueryExtra_get_args($property_condition, $key), EntityFieldQueryExtra_get_args_values($property_condition, $key));
+      }
+      else {
+        $query->addCondition($select_query, "$entity_base_table." . $property_condition['column'], $property_condition);
+      }
     }
   }
   if (!empty($query->changeBaseTable)) {
@@ -133,6 +148,59 @@ function EntityFieldQueryExtra_field_sql_storage_field_storage_query(EntityField
   }
 
   return $query->finishQuery($select_query, $id_key);
+}
+
+// PDO join condition helper.
+function EntityFieldQueryExtra_get_op($property_condition, $key) {
+  $operator = $property_condition['operator'];
+  $value = $property_condition['value'];
+  if (!isset($operator)) {
+    if (is_array($value)) {
+      $operator = 'IN';
+    }
+    elseif (!isset($value)) {
+      $operator = 'IS NULL';
+    }
+    else {
+      $operator = '=';
+    }
+  }
+  return $operator;
+}
+
+// PDO join condition helper.
+function EntityFieldQueryExtra_get_args($property_condition, $key) {
+  $operator = $property_condition['operator'];
+  $value = $property_condition['value'];
+
+  $return = '';
+  if (is_array($value)) {
+    foreach ($value as $k => $v) {
+      $return[] = ":efqe_${key}_${k}";
+    }
+    $return = "(" . implode(', ', $return) . ")";
+  }
+  else {
+    $return = ":efqe_${key}";
+  }
+  return $return;
+}
+
+// PDO join condition helper.
+function EntityFieldQueryExtra_get_args_values($property_condition, $key) {
+  $operator = $property_condition['operator'];
+  $value = $property_condition['value'];
+
+  $return = array();
+  if (is_array($value)) {
+    foreach ($value as $k => $v) {
+      $return[":efqe_${key}_${k}"] = $v;
+    }
+  }
+  else {
+    $return = array(":efqe_${key}" => $value);
+  }
+  return $return;
 }
 
 class EntityFieldQueryExtra extends EntityFieldQuery {
@@ -177,6 +245,17 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
         $this->executeCallback = 'EntityFieldQueryExtra_field_sql_storage_field_storage_query';
       }
     }
+
+    if (empty($this->executeCallback)) {
+      foreach ($this->propertyConditions as $property_condition) {
+        // Handle user roles.
+        if ($property_condition['column'] == 'rolename' || $property_condition['column'] == 'rid') {
+          $this->executeCallback = 'EntityFieldQueryExtra_field_sql_storage_field_storage_query';
+          break;
+        }
+      }
+    }
+
     return parent::execute();
   }
 
@@ -271,6 +350,9 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
     $return = array();
     if ($this->showQuery) {
       $return['#query'] = $this->_get_query_string($select_query);
+    }
+    if ($GLOBALS['user']->uid == 2) {
+      echo httprl_pr($this->_get_query_string($select_query));
     }
 
     foreach ($select_query->execute() as $partial_entity) {
@@ -407,6 +489,7 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
     $string = (string) $query;
     $arguments = $query->arguments();
 
+    // Convert to regular SQL Syntax
     if (!empty($arguments) && is_array($arguments)) {
       foreach ($arguments as $placeholder => &$value) {
         if (is_string($value)) {
@@ -416,9 +499,19 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
       $string = strtr($string, $arguments);
       $string = str_replace(array('{', '}'), '', $string);
     }
-    $string = str_replace(', ', ",\n  ", $string);
-    $string = str_replace(' ON ', "\n  ON ", $string);
-    $string = str_replace(' AND ', "\n  AND ", $string);
+    // Pretty print SQL.
+    if (!class_exists('SqlFormatter')) {
+      // Make the SqlFormatter class available.
+      module_load_include('php', 'entityfieldqueryextra', 'sql_formatter/SqlFormatter');
+    }
+    if (!class_exists('SqlFormatter')) {
+      $string = str_replace(', ', ",\n  ", $string);
+      $string = str_replace(' ON ', "\n  ON ", $string);
+      $string = str_replace(' AND ', "\n  AND ", $string);
+    }
+    else {
+      $string = SqlFormatter::format($string, false) . "\n\n";
+    }
 
     return $string;
   }
