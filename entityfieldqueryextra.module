@@ -106,7 +106,7 @@ function EntityFieldQueryExtra_field_sql_storage_field_storage_query(EntityField
       }
       elseif ($property_condition['column'] == 'rid') {
         // Direct join is faster than a select join.
-        $select_query->join('users_roles', 'users_roles' . $key, "users_roles$key.uid = $entity_base_table.uid AND users_roles$key.rid " . EntityFieldQueryExtra_get_op($property_condition) . EntityFieldQueryExtra_get_args($property_condition, $key), EntityFieldQueryExtra_get_args_values($property_condition, $key));
+        $select_query->join('users_roles', 'users_roles' . $key, "users_roles$key.uid = $entity_base_table.uid AND users_roles$key.rid " . EntityFieldQueryExtra_get_op($property_condition, $key) . EntityFieldQueryExtra_get_args($property_condition, $key), EntityFieldQueryExtra_get_args_values($property_condition, $key));
       }
       else {
         $query->addCondition($select_query, "$entity_base_table." . $property_condition['column'], $property_condition);
@@ -213,6 +213,69 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
   public $changeBaseTable = FALSE;
   public $entity_type = NULL;
   public $bundle = NULL;
+
+  public function executeEntityLoad() {
+    $results = $this->execute();
+    $keys = array(
+      'node' => 'nodes',
+      'user' => 'users',
+    );
+    foreach ($keys as $i => $j) {
+      // Skip if top level type does not exist.
+      if (!isset($results[$i])) {
+        continue;
+      }
+      $eid = array_keys($results[$i]);
+      $results[$j] = entity_load($i, $eid);
+    }
+    return $results;
+  }
+
+  public function executeEntityBuild() {
+    $results = $this->execute();
+    $keys = array(
+      'node' => 'nodes',
+      'user' => 'users',
+    );
+    $field_names = array();
+    foreach ($this->addedFields as $fields) {
+      $field_names[$fields['field_name'] . '_' . $fields['column']] = array(
+        $fields['field_name'],
+        $fields['column'],
+      );
+    }
+
+    foreach ($keys as $i => $j) {
+      // Skip if top level type does not exist.
+      if (!isset($results[$i])) {
+        continue;
+      }
+
+      $results[$j] = array();
+      foreach($results[$i] as $nid => $values) {
+        $results[$j][$nid] = new stdClass();
+        foreach ($values as $k => $v) {
+          if (!array_key_exists($k, $field_names)) {
+            $results[$j][$nid]->{$k} = $v;
+          }
+        }
+        // Put fields in at the bottom of the object.
+        foreach ($values as $k => $v) {
+          if (array_key_exists($k, $field_names)) {
+            if (is_array($v)) {
+              foreach ($v as $a => $b) {
+                $results[$j][$nid]->{$field_names[$k][0]}['und'][$a][$field_names[$k][1]] = $b;
+              }
+            }
+            else {
+              $results[$j][$nid]->{$field_names[$k][0]}['und'][0][$field_names[$k][1]] = $v;
+            }
+          }
+        }
+      }
+    }
+    return $results;
+  }
 
   public function execute() {
     // Sort field arrays so tables added via getFieldValue are joined last.
@@ -352,9 +415,6 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
     $return = array();
     if ($this->showQuery) {
       $return['#query'] = $this->_get_query_string($select_query);
-    }
-    if ($GLOBALS['user']->uid == 2) {
-      echo httprl_pr($this->_get_query_string($select_query));
     }
 
     foreach ($select_query->execute() as $partial_entity) {
