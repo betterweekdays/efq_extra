@@ -268,7 +268,12 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
               }
             }
             else {
-              $results[$j][$nid]->{$field_names[$k][0]}['und'][0][$field_names[$k][1]] = $v;
+              if (is_null($v)) {
+                $results[$j][$nid]->{$field_names[$k][0]} = array();
+              }
+              else {
+                $results[$j][$nid]->{$field_names[$k][0]}['und'][0][$field_names[$k][1]] = $v;
+              }
             }
           }
         }
