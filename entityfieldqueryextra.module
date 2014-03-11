@@ -106,7 +106,7 @@ function EntityFieldQueryExtra_field_sql_storage_field_storage_query(EntityField
       }
       elseif ($property_condition['column'] == 'rid') {
         // Direct join is faster than a select join.
-        $select_query->join('users_roles', 'users_roles' . $key, "users_roles$key.uid = $entity_base_table.uid AND users_roles$key.rid " . EntityFieldQueryExtra_get_op($property_condition, $key) . EntityFieldQueryExtra_get_args($property_condition, $key), EntityFieldQueryExtra_get_args_values($property_condition, $key));
+        $select_query->join('users_roles', 'users_roles' . $key, "users_roles$key.uid = $entity_base_table.uid AND users_roles$key.rid " . EntityFieldQueryExtra_get_op($property_condition) . EntityFieldQueryExtra_get_args($property_condition, $key), EntityFieldQueryExtra_get_args_values($property_condition, $key));
       }
       else {
         $query->addCondition($select_query, "$entity_base_table." . $property_condition['column'], $property_condition);
@@ -151,7 +151,7 @@ function EntityFieldQueryExtra_field_sql_storage_field_storage_query(EntityField
 }
 
 // PDO join condition helper.
-function EntityFieldQueryExtra_get_op($property_condition, $key) {
+function EntityFieldQueryExtra_get_op($property_condition) {
   $operator = $property_condition['operator'];
   $value = $property_condition['value'];
   if (!isset($operator)) {
