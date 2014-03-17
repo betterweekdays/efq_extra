@@ -206,13 +206,17 @@ function EntityFieldQueryExtra_get_args_values($property_condition, $key) {
 }
 
 class EntityFieldQueryExtra extends EntityFieldQuery {
-  // Extra added fields to the query
+  // Variables used internally.
   private $addedFields = array();
   private $addedProperties = array();
   private $showQuery = FALSE;
+  private $printQuery = FALSE;
+
+  // Variables used internally & externally.
   public $changeBaseTable = FALSE;
   public $entity_type = NULL;
   public $bundle = NULL;
+  public $get_user_roles = FALSE;
 
   public function executeEntityLoad() {
     $results = $this->execute();
@@ -229,6 +233,49 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
       $results[$j] = entity_load($i, $eid);
     }
     return $results;
+  }
+
+  public function executeEntityBuildAll() {
+    // Get entity and bundle name.
+    $entity_type = NULL;
+    $bundle_name = NULL;
+    if (isset($this->entityConditions['entity_type']['value'])) {
+      $entity_type = $this->entityConditions['entity_type']['value'];
+      if (isset($this->entityConditions['bundle']['value'])) {
+        $bundle_name = $this->entityConditions['bundle']['value'];
+      }
+    }
+    // Get all Properties.
+    $entity = entity_get_info($entity_type);
+    $properties = $entity['schema_fields_sql']['base table'];
+    foreach ($properties as $column) {
+      if (!array_key_exists($column, $this->addedProperties)) {
+        $this->getPropertyValue($column);
+      }
+    }
+
+    // Get user roles.
+    $this->getPropertyValue('roles');
+
+    // Get all fields.
+    $fields_info = field_info_instances($entity_type, $bundle_name);
+    $field_output = array();
+    foreach ($fields_info[$entity_type] as $field_name => $value) {
+      $field_info = field_info_field($field_name);
+      $output = reset($field_info['storage']['details']['sql']['FIELD_LOAD_CURRENT']);
+      $field_output[$field_name] = array_keys($output);
+    }
+
+    foreach ($field_output as $field_name => $columns) {
+      foreach ($columns as $column) {
+        if (!array_key_exists($field_name . '_' . $column, $this->addedFields)) {
+          $this->getFieldValue($field_name, $column, 'LEFT');
+        }
+      }
+    }
+
+    // Run the query.
+    return $this->executeEntityBuild();
   }
 
   public function executeEntityBuild() {
@@ -261,20 +308,42 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
         }
         // Put fields in at the bottom of the object.
         foreach ($values as $k => $v) {
-          if (array_key_exists($k, $field_names)) {
-            if (is_array($v)) {
-              foreach ($v as $a => $b) {
-                $results[$j][$nid]->{$field_names[$k][0]}['und'][$a][$field_names[$k][1]] = $b;
+          if (!array_key_exists($k, $field_names)) {
+            continue;
+          }
+          if (is_array($v)) {
+            foreach ($v as $a => $b) {
+              $results[$j][$nid]->{$field_names[$k][0]}['und'][$a][$field_names[$k][1]] = $b;
+            }
+          }
+          else {
+            $results[$j][$nid]->{$field_names[$k][0]}['und'][0][$field_names[$k][1]] = $v;
+          }
+        }
+        // Remove empty fields.
+        foreach ($values as $k => $v) {
+          $all_null = TRUE;
+          if (!array_key_exists($k, $field_names) || !isset($results[$j][$nid]->{$field_names[$k][0]}['und'])) {
+            continue;
+          }
+          foreach ($results[$j][$nid]->{$field_names[$k][0]}['und'] as $delta => $data) {
+            foreach ($data as $info) {
+              if (!is_null($info)) {
+                $all_null = FALSE;
+                break 2;
               }
             }
-            else {
-              if (is_null($v)) {
-                $results[$j][$nid]->{$field_names[$k][0]} = array();
-              }
-              else {
-                $results[$j][$nid]->{$field_names[$k][0]}['und'][0][$field_names[$k][1]] = $v;
-              }
-            }
+          }
+          if ($all_null) {
+            unset($results[$j][$nid]->{$field_names[$k][0]}['und']);
+            $results[$j][$nid]->{$field_names[$k][0]} = array();
+          }
+        }
+        // unserialize data if it has been serialized.
+        if (isset($results[$j][$nid]->{'data'})) {
+          $data = @unserialize($results[$j][$nid]->{'data'});
+          if ($results[$j][$nid]->{'data'} === 'b:0;' || $data !== FALSE) {
+            $results[$j][$nid]->{'data'} = $data;
           }
         }
       }
@@ -285,6 +354,7 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
   public function execute() {
     // Sort field arrays so tables added via getFieldValue are joined last.
     if (!empty($this->fields)) {
+      // Sort fields so conditional fields show up first.
       ksort($this->fields);
       // If we have no conditions on the fields use our alt callback.
       if (!array_key_exists(0, $this->fields)) {
@@ -318,7 +388,7 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
 
     if (empty($this->executeCallback)) {
       foreach ($this->propertyConditions as $property_condition) {
-        // Handle user roles.
+        // Handle user role conditions.
         if ($property_condition['column'] == 'rolename' || $property_condition['column'] == 'rid') {
           $this->executeCallback = 'EntityFieldQueryExtra_field_sql_storage_field_storage_query';
           break;
@@ -332,7 +402,7 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
   /**
    * Finishes the query.
    *
-   * Adds tags, metaData, range and returns the requested list or count.
+   * Adds tags, meta data, range and returns the requested list or count.
    *
    * @param SelectQuery $select_query
    *   A SelectQuery which has entity_type, entity_id, revision_id and bundle
@@ -375,7 +445,7 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
       return $select_query->countQuery()->execute()->fetchField();
     }
 
-    // Our modifed code.
+    // Our modified code.
     $columns = array();
     foreach($this->addedFields as $addedField) {
       $fields = $select_query->getFields();
@@ -410,18 +480,55 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
       else {
         $base_table = $this->changeBaseTable;
       }
-      foreach($this->addedProperties as $column) {
-        // Add property to query.
-        $select_query->addField($base_table, $column);
+      foreach($this->addedProperties as $key => $column) {
+        if ($column == 'roles') {
+          // Special case for user roles.
+          $role_alias = 'role_' . $key;
+          $users_role_alias = 'users_roles_' . $key;
+          $users_role_alias_found = FALSE;
+          $role_alias_found = FALSE;
+
+          // Reuse tables if possible.
+          $tables =& $select_query->getTables();
+          foreach ($tables as &$table) {
+            if ($table['table'] == 'users_roles') {
+              $users_role_alias = $table['alias'];
+              $users_role_alias_found = TRUE;
+            }
+            if ($table['table'] == 'role') {
+              $role_alias = $table['alias'];
+              $role_alias_found = TRUE;
+            }
+          }
+          if (empty($users_role_alias_found)) {
+            $select_query->join('users_roles', $users_role_alias, "$users_role_alias.uid = $base_table.uid");
+          }
+          if (empty($role_alias_found)) {
+            $select_query->join('role', $role_alias, "$role_alias.rid = $users_role_alias.rid");
+          }
+
+          // Get role field info.
+          $select_query->addField($role_alias, 'name', 'role_names');
+          $select_query->addField($role_alias, 'rid', 'role_rids');
+        }
+        else {
+          // Add property to query.
+          $select_query->addField($base_table, $column);
+        }
         $columns[] = $column;
       }
     }
 
+    // Add in query debugging if needed.
     $return = array();
     if ($this->showQuery) {
       $return['#query'] = $this->_get_query_string($select_query);
     }
+    if ($this->printQuery) {
+      print($this->_get_query_string($select_query));
+    }
 
+    // Run the query and iterate over each result returned.
     foreach ($select_query->execute() as $partial_entity) {
       $bundle = isset($partial_entity->bundle) ? $partial_entity->bundle : $this->bundle;
       $entity_type = isset($partial_entity->entity_type) ? $partial_entity->entity_type : $this->entity_type;
@@ -441,8 +548,12 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
         $return[$entity_type][$partial_entity->$id_key] = $entity;
       }
       else {
-        // Handle mutiple delta values.
+        // Handle multiple delta values.
         foreach ($entity as $k => $v) {
+          // Special case roles.
+          if ($k == 'roles' && is_null($v)) {
+            continue;
+          }
           if ($return[$entity_type][$partial_entity->$id_key]->$k != $v) {
             if (!is_array($return[$entity_type][$partial_entity->$id_key]->$k)) {
               $temp = $return[$entity_type][$partial_entity->$id_key]->$k;
@@ -450,6 +561,30 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
               $return[$entity_type][$partial_entity->$id_key]->{$k} = array($temp);
             }
             $return[$entity_type][$partial_entity->$id_key]->{$k}[] = $v;
+          }
+        }
+      }
+      // Handle roles.
+      if (isset($this->addedProperties['roles'])) {
+        // Add in core default roles.
+        if (isset($return[$entity_type][$partial_entity->$id_key]->{'uid'})) {
+          if ($return[$entity_type][$partial_entity->$id_key]->{'uid'}) {
+            $return[$entity_type][$partial_entity->$id_key]->{'roles'}[DRUPAL_AUTHENTICATED_RID] = 'authenticated user';
+          }
+          else {
+            $return[$entity_type][$partial_entity->$id_key]->{'role_names'}[DRUPAL_ANONYMOUS_RID] = 'anonymous user';
+          }
+        }
+
+        // Add in set roles.
+        if (!empty($return[$entity_type][$partial_entity->$id_key]->{'role_names'}) && !empty($return[$entity_type][$partial_entity->$id_key]->{'role_rids'})) {
+          if (!is_array($return[$entity_type][$partial_entity->$id_key]->{'role_rids'})) {
+            $return[$entity_type][$partial_entity->$id_key]->{'roles'}[$return[$entity_type][$partial_entity->$id_key]->{'role_rids'}] = $return[$entity_type][$partial_entity->$id_key]->{'role_names'};
+          }
+          else {
+            foreach ($return[$entity_type][$partial_entity->$id_key]->{'role_rids'} as $k => $v) {
+              $return[$entity_type][$partial_entity->$id_key]->{'roles'}[$v] = $return[$entity_type][$partial_entity->$id_key]->{'role_names'}[$k];
+            }
           }
         }
       }
@@ -492,7 +627,7 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
       'index' => $index,
       'join_type' => $join_type,
     );
-    $this->addedFields[] = $added_fields;
+    $this->addedFields[$field['field_name'] . '_' . $column] = $added_fields;
     return $this;
   }
 
@@ -507,13 +642,12 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
    */
   public function getPropertyValue($column) {
     // Save data needed in the finishQuery() method.
-    $this->addedProperties[] = $column;
+    $this->addedProperties[$column] = $column;
     return $this;
   }
 
-
   /**
-   * Add extra property data to the output.
+   * Add the query that was ran to the returned object under the #query key.
    *
    * @param bool $bool
    *   Set to TRUE to see the query being ran.
@@ -524,6 +658,21 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
   public function showQuery($bool = TRUE) {
     // Save data needed in the finishQuery() method.
     $this->showQuery = $bool;
+    return $this;
+  }
+
+  /**
+   * Print out the query that is going to ran.
+   *
+   * @param bool $bool
+   *   Set to TRUE to print out the query being ran.
+   *
+   * @return EntityFieldQuery
+   *   The called object.
+   */
+  public function printQuery($bool = TRUE) {
+    // Save data needed in the finishQuery() method.
+    $this->printQuery = $bool;
     return $this;
   }
 
@@ -552,6 +701,15 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
     return $index;
   }
 
+  /**
+   * Return back a string of the query that is going to be ran.
+   *
+   * @param object $query
+   *   SelectQueryInterface object.
+   *
+   * @return string
+   *   Formatted query string.
+   */
   private function _get_query_string(SelectQueryInterface $query) {
     $string = (string) $query;
     $arguments = $query->arguments();
@@ -564,7 +722,7 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
         }
       }
       $string = strtr($string, $arguments);
-      $string = str_replace(array('{', '}'), '', $string);
+      $string = str_replace(array(' {', '} ', "\n{", "}\n"), ' ', $string);
     }
     // Pretty print SQL.
     if (!class_exists('SqlFormatter')) {
@@ -573,12 +731,12 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
     }
     if (!class_exists('SqlFormatter')) {
       $string = str_replace(', ', ",\n  ", $string);
-      $string = str_replace(' ON ', "\n  ON ", $string);
       $string = str_replace(' AND ', "\n  AND ", $string);
     }
     else {
       $string = SqlFormatter::format($string, false) . "\n\n";
     }
+    $string = str_replace(' ON ', "\n  ON ", $string);
 
     return $string;
   }
