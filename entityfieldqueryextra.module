@@ -54,7 +54,12 @@ function EntityFieldQueryExtra_field_sql_storage_field_storage_query(EntityField
         $select_query->addTag('entity_field_access');
       }
       $select_query->addMetaData('base_table', $tablename);
-      $select_query->fields($table_alias, array('entity_type', 'entity_id', 'revision_id', 'bundle'));
+      if ($query->executeQuery) {
+        $select_query->fields($table_alias, array('entity_type', 'entity_id', 'revision_id', 'bundle'));
+      }
+      else {
+        $select_query->fields($table_alias, array('entity_id'));
+      }
       $field_base_table = $table_alias;
       $first = FALSE;
     }
@@ -211,12 +216,26 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
   private $addedProperties = array();
   private $showQuery = FALSE;
   private $printQuery = FALSE;
+  private $EFQpropertyConditionsQueries = array();
+  private $EFQpropertyConditionsColumns = array();
 
   // Variables used internally & externally.
   public $changeBaseTable = FALSE;
+  public $executeQuery = TRUE;
   public $entity_type = NULL;
   public $bundle = NULL;
   public $get_user_roles = FALSE;
+
+  public function EFQpropertyCondition(EntityFieldQueryExtra $efqe_sub, $column) {
+    $efqe_sub->executeQuery = FALSE;
+    $efqe_sub->executeCallback = 'EntityFieldQueryExtra_field_sql_storage_field_storage_query';
+    $this->EFQpropertyConditionsQueries[] = $efqe_sub->execute();
+    $this->EFQpropertyConditionsColumns[] = $column;
+    $efqe_sub->executeQuery = TRUE;
+    $efqe_sub->executeCallback = NULL;
+
+    return $this;
+  }
 
   public function executeEntityLoad() {
     $results = $this->execute();
@@ -423,6 +442,154 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
    *   See EntityFieldQuery::execute().
    */
   function finishQuery($select_query, $id_key = 'entity_id') {
+    if (!empty($this->EFQpropertyConditionsQueries)) {
+      foreach ($this->EFQpropertyConditionsQueries as $key => $subquery) {
+        $column = $this->EFQpropertyConditionsColumns[$key];
+        $select_query->condition("node.$column", $subquery, 'IN');
+      }
+    }
+    $columns = $this->_prep_final_query($select_query, $id_key);
+    if ($this->executeQuery) {
+      return $this->_execute_final_query($select_query, $id_key, $columns);
+    }
+    else {
+      return $select_query;
+    }
+  }
+
+  public function propertyOrderBy($column, $direction = 'ASC', $table = '') {
+    $order_array = array(
+      'specifier' => $column,
+      'direction' => $direction,
+    );
+
+    if (empty($table)) {
+      $order_array += array(
+        'type' => 'property',
+      );
+    }
+    else {
+      $order_array += array(
+        'type' => 'alt_base_table_property',
+        'table' => $table,
+      );
+    }
+    $this->order[] = $order_array;
+    return $this;
+  }
+
+  /**
+   * Add extra field data to the output.
+   *
+   * @param string $field
+   *   Either a field name or a field array.
+   * @param string $column
+   *   A column defined in the hook_field_schema() of this field. entity_id
+   *   and bundle can also be used.
+   * @param string $join_type
+   *   (optional) What type of join to use. Default is LEFT.
+   *
+   * @return EntityFieldQuery
+   *   The called object.
+   */
+  public function getFieldValue($field, $column, $join_type = 'LEFT') {
+    // Add field to the main query.
+    if (is_scalar($field)) {
+      $field_definition = field_info_field($field);
+      if (empty($field_definition)) {
+        throw new EntityFieldQueryException(t('Unknown field: @field_name', array('@field_name' => $field)));
+      }
+      $field = $field_definition;
+    }
+
+    // Save the index used for the new field, for later use in field storage.
+    $index = $this->saveFieldIndex($field);
+
+    // Save data needed in the finishQuery() method.
+    $added_fields = array(
+      'field_name' => $field['field_name'],
+      'column' => $column,
+      'index' => $index,
+      'join_type' => $join_type,
+    );
+    $this->addedFields[$field['field_name'] . '_' . $column] = $added_fields;
+    return $this;
+  }
+
+  /**
+   * Add extra property data to the output.
+   *
+   * @param string $column
+   *   A column defined in the hook_field_schema() of the entity.
+   *
+   * @return EntityFieldQuery
+   *   The called object.
+   */
+  public function getPropertyValue($column, $base_table = '') {
+    // Save data needed in the finishQuery() method.
+    $this->addedProperties[$column.$base_table] = array(
+      $column,
+      $base_table,
+    );
+    return $this;
+  }
+
+  /**
+   * Add the query that was ran to the returned object under the #query key.
+   *
+   * @param bool $bool
+   *   Set to TRUE to see the query being ran.
+   *
+   * @return EntityFieldQuery
+   *   The called object.
+   */
+  public function showQuery($bool = TRUE) {
+    // Save data needed in the finishQuery() method.
+    $this->showQuery = $bool;
+    return $this;
+  }
+
+  /**
+   * Print out the query that is going to ran.
+   *
+   * @param bool $bool
+   *   Set to TRUE to print out the query being ran.
+   *
+   * @return EntityFieldQuery
+   *   The called object.
+   */
+  public function printQuery($bool = TRUE) {
+    // Save data needed in the finishQuery() method.
+    $this->printQuery = $bool;
+    return $this;
+  }
+
+  /**
+   * Check if the field already has a table that does a join.
+   *
+   * @param array $field
+   *   field array from field_info_field().
+   *
+   * @return int
+   *   key position in $this->fields array.
+   */
+  private function saveFieldIndex($field) {
+    $fields = $this->fields;
+    foreach ($fields as $index => $field_info) {
+      if (isset($field_info['field_name']) && $field_info['field_name'] == $field['field_name']) {
+        return $index;
+      }
+    }
+    // Add these tables in after conditions.
+    $index = 100;
+    if (isset($field['storage'])) {
+      $index += count($this->fields);
+      $this->fields[$index] = $field;
+    }
+    return $index;
+  }
+
+  private function _prep_final_query($select_query, $id_key = 'entity_id') {
     // Iterate through all fields. If the query is trying to fetch results
     // where a field is null, then alter the query to use a LEFT OUTER join.
     // Otherwise the query will always return 0 results.
@@ -490,7 +657,7 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
         $base_table = $this->changeBaseTable;
       }
       foreach($this->addedProperties as $key => $column) {
-        if ($column == 'roles') {
+        if ($column[0] == 'roles') {
           // Special case for user roles.
           $role_alias = 'role_' . $key;
           $users_role_alias = 'users_roles_' . $key;
@@ -522,19 +689,54 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
         }
         else {
           // Add property to query.
-          $select_query->addField($base_table, $column);
+          if (empty($column[1])) {
+            $select_query->addField($base_table, $column[0]);
+            $columns[] = $column[0];
+          }
+          else {
+            // Reuse tables if possible.
+            $tables =& $select_query->getTables();
+            $temp_base_table = $column[1];
+            foreach ($tables as &$table) {
+              if ($table['table'] == $column[1]) {
+                $temp_base_table = $table['alias'];
+                $temp_base_table_found = TRUE;
+              }
+            }
+            if (empty($temp_base_table_found)) {
+              if ($column[1] == 'users') {
+                $id = 'uid';
+              }
+              if ($column[1] == 'node') {
+                $id = 'nid';
+              }
+              $select_query->join($temp_base_table, $temp_base_table, "$temp_base_table.$id = $base_table.$id");
+            }
+            $select_query->addField($temp_base_table, $column[0], $column[1] . '_' . $column[0]);
+            $columns[] = $column[1] . '_' . $column[0];
+          }
         }
-        $columns[] = $column;
+      }
+    }
+    if (!empty($this->order)) {
+      foreach ($this->order as $order) {
+        if ($order['type'] == 'alt_base_table_property') {
+          $select_query->orderBy($order['table'] . '.' . $order['specifier'], $order['direction']);
+        }
       }
     }
 
     // Add in query debugging if needed.
+    if ($this->printQuery) {
+      print($this->_get_query_string($select_query));
+    }
+    return $columns;
+  }
+
+  private function _execute_final_query($select_query, $id_key = 'entity_id', $columns = array()) {
     $return = array();
     if ($this->showQuery) {
       $return['#query'] = $this->_get_query_string($select_query);
-    }
-    if ($this->printQuery) {
-      print($this->_get_query_string($select_query));
     }
 
     // Run the query and iterate over each result returned.
@@ -600,114 +802,6 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
       $this->ordered_results[] = $partial_entity;
     }
     return $return;
-  }
-
-  /**
-   * Add extra field data to the output.
-   *
-   * @param string $field
-   *   Either a field name or a field array.
-   * @param string $column
-   *   A column defined in the hook_field_schema() of this field. entity_id
-   *   and bundle can also be used.
-   * @param string $join_type
-   *   (optional) What type of join to use. Default is LEFT.
-   *
-   * @return EntityFieldQuery
-   *   The called object.
-   */
-  public function getFieldValue($field, $column, $join_type = 'LEFT') {
-    // Add field to the main query.
-    if (is_scalar($field)) {
-      $field_definition = field_info_field($field);
-      if (empty($field_definition)) {
-        throw new EntityFieldQueryException(t('Unknown field: @field_name', array('@field_name' => $field)));
-      }
-      $field = $field_definition;
-    }
-
-    // Save the index used for the new field, for later use in field storage.
-    $index = $this->saveFieldIndex($field);
-
-    // Save data needed in the finishQuery() method.
-    $added_fields = array(
-      'field_name' => $field['field_name'],
-      'column' => $column,
-      'index' => $index,
-      'join_type' => $join_type,
-    );
-    $this->addedFields[$field['field_name'] . '_' . $column] = $added_fields;
-    return $this;
-  }
-
-  /**
-   * Add extra property data to the output.
-   *
-   * @param string $column
-   *   A column defined in the hook_field_schema() of the entity.
-   *
-   * @return EntityFieldQuery
-   *   The called object.
-   */
-  public function getPropertyValue($column) {
-    // Save data needed in the finishQuery() method.
-    $this->addedProperties[$column] = $column;
-    return $this;
-  }
-
-  /**
-   * Add the query that was ran to the returned object under the #query key.
-   *
-   * @param bool $bool
-   *   Set to TRUE to see the query being ran.
-   *
-   * @return EntityFieldQuery
-   *   The called object.
-   */
-  public function showQuery($bool = TRUE) {
-    // Save data needed in the finishQuery() method.
-    $this->showQuery = $bool;
-    return $this;
-  }
-
-  /**
-   * Print out the query that is going to ran.
-   *
-   * @param bool $bool
-   *   Set to TRUE to print out the query being ran.
-   *
-   * @return EntityFieldQuery
-   *   The called object.
-   */
-  public function printQuery($bool = TRUE) {
-    // Save data needed in the finishQuery() method.
-    $this->printQuery = $bool;
-    return $this;
-  }
-
-  /**
-   * Check if the field already has a table that does a join.
-   *
-   * @param array $field
-   *   field array from field_info_field().
-   *
-   * @return int
-   *   key position in $this->fields array.
-   */
-  private function saveFieldIndex($field) {
-    $fields = $this->fields;
-    foreach ($fields as $index => $field_info) {
-      if (isset($field_info['field_name']) && $field_info['field_name'] == $field['field_name']) {
-        return $index;
-      }
-    }
-    // Add these tables in after conditions.
-    $index = 100;
-    if (isset($field['storage'])) {
-      $index += count($this->fields);
-      $this->fields[$index] = $field;
-    }
-    return $index;
   }
 
   /**
