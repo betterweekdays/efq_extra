@@ -210,14 +210,70 @@ function EntityFieldQueryExtra_get_args_values($property_condition, $key) {
   return $return;
 }
 
+function EntityFieldQueryExtra_entity_create($values, $field_names) {
+  $object = new stdClass();
+  foreach ($values as $k => $v) {
+    if (!array_key_exists($k, $field_names)) {
+      $object->{$k} = $v;
+    }
+  }
+  // Put fields in at the bottom of the object.
+  foreach ($values as $k => $v) {
+    if (!array_key_exists($k, $field_names)) {
+      continue;
+    }
+    if (is_array($v)) {
+      foreach ($v as $a => $b) {
+        $object->{$field_names[$k][0]}['und'][$a][$field_names[$k][1]] = $b;
+      }
+    }
+    else {
+      $object->{$field_names[$k][0]}['und'][0][$field_names[$k][1]] = $v;
+    }
+  }
+  // Remove empty fields.
+  EntityFieldQueryExtra_entity_create_kill_null($object, $values, $field_names);
+
+  // unserialize data if it has been serialized.
+  if (isset($object->{'data'})) {
+    $data = @unserialize($object->{'data'});
+    if ($object->{'data'} === 'b:0;' || $data !== FALSE) {
+      $object->{'data'} = $data;
+    }
+  }
+  return $object;
+}
+
+function EntityFieldQueryExtra_entity_create_kill_null(&$object) {
+  foreach ($object as $key => $values) {
+    if (!isset($values['und'])) {
+      continue;
+    }
+    $all_null = TRUE;
+//     echo httprl_pr($values['und']);
+    foreach ($values['und'] as $delta => $data) {
+      foreach ($data as $info) {
+        if (!is_null($info)) {
+          $all_null = FALSE;
+          break 2;
+        }
+      }
+    }
+    if ($all_null) {
+      unset($object->{$key}['und']);
+      $object->{$key} = array();
+    }
+  }
+}
+
 class EntityFieldQueryExtra extends EntityFieldQuery {
   // Variables used internally.
   private $addedFields = array();
   private $addedProperties = array();
   private $showQuery = FALSE;
   private $printQuery = FALSE;
-  private $EFQpropertyConditionsQueries = array();
-  private $EFQpropertyConditionsColumns = array();
+  private $EFQpropertyConditions = array();
+  private $EFQjoin = array();
 
   // Variables used internally & externally.
   public $changeBaseTable = FALSE;
@@ -225,17 +281,6 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
   public $entity_type = NULL;
   public $bundle = NULL;
   public $get_user_roles = FALSE;
-
-  public function EFQpropertyCondition(EntityFieldQueryExtra $efqe_sub, $column) {
-    $efqe_sub->executeQuery = FALSE;
-    $efqe_sub->executeCallback = 'EntityFieldQueryExtra_field_sql_storage_field_storage_query';
-    $this->EFQpropertyConditionsQueries[] = $efqe_sub->execute();
-    $this->EFQpropertyConditionsColumns[] = $column;
-    $efqe_sub->executeQuery = TRUE;
-    $efqe_sub->executeCallback = NULL;
-
-    return $this;
-  }
 
   public function executeEntityLoad() {
     $results = $this->execute();
@@ -312,6 +357,21 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
       'node' => 'nodes',
       'user' => 'users',
     );
+    foreach ($keys as $i => $j) {
+      // Skip if top level type does not exist.
+      if (!isset($results[$i])) {
+        continue;
+      }
+
+      $results[$j] = array();
+      foreach($results[$i] as $id => $values) {
+        $results[$j][$id] = $this->entity_create($values);
+      }
+    }
+    return $results;
+  }
+
+  function entity_create($values) {
     $field_names = array();
     foreach ($this->addedFields as $fields) {
       $field_names[$fields['field_name'] . '_' . $fields['column']] = array(
@@ -320,63 +380,7 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
       );
     }
 
-    foreach ($keys as $i => $j) {
-      // Skip if top level type does not exist.
-      if (!isset($results[$i])) {
-        continue;
-      }
-
-      $results[$j] = array();
-      foreach($results[$i] as $nid => $values) {
-        $results[$j][$nid] = new stdClass();
-        foreach ($values as $k => $v) {
-          if (!array_key_exists($k, $field_names)) {
-            $results[$j][$nid]->{$k} = $v;
-          }
-        }
-        // Put fields in at the bottom of the object.
-        foreach ($values as $k => $v) {
-          if (!array_key_exists($k, $field_names)) {
-            continue;
-          }
-          if (is_array($v)) {
-            foreach ($v as $a => $b) {
-              $results[$j][$nid]->{$field_names[$k][0]}['und'][$a][$field_names[$k][1]] = $b;
-            }
-          }
-          else {
-            $results[$j][$nid]->{$field_names[$k][0]}['und'][0][$field_names[$k][1]] = $v;
-          }
-        }
-        // Remove empty fields.
-        foreach ($values as $k => $v) {
-          $all_null = TRUE;
-          if (!array_key_exists($k, $field_names) || !isset($results[$j][$nid]->{$field_names[$k][0]}['und'])) {
-            continue;
-          }
-          foreach ($results[$j][$nid]->{$field_names[$k][0]}['und'] as $delta => $data) {
-            foreach ($data as $info) {
-              if (!is_null($info)) {
-                $all_null = FALSE;
-                break 2;
-              }
-            }
-          }
-          if ($all_null) {
-            unset($results[$j][$nid]->{$field_names[$k][0]}['und']);
-            $results[$j][$nid]->{$field_names[$k][0]} = array();
-          }
-        }
-        // unserialize data if it has been serialized.
-        if (isset($results[$j][$nid]->{'data'})) {
-          $data = @unserialize($results[$j][$nid]->{'data'});
-          if ($results[$j][$nid]->{'data'} === 'b:0;' || $data !== FALSE) {
-            $results[$j][$nid]->{'data'} = $data;
-          }
-        }
-      }
-    }
-    return $results;
+    return EntityFieldQueryExtra_entity_create($values, $field_names);
   }
 
   public function execute() {
@@ -427,34 +431,19 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
     return parent::execute();
   }
 
-  /**
-   * Finishes the query.
-   *
-   * Adds tags, meta data, range and returns the requested list or count.
-   *
-   * @param SelectQuery $select_query
-   *   A SelectQuery which has entity_type, entity_id, revision_id and bundle
-   *   fields added.
-   * @param string $id_key
-   *   Which field's values to use as the returned array keys.
-   *
-   * @return
-   *   See EntityFieldQuery::execute().
-   */
-  function finishQuery($select_query, $id_key = 'entity_id') {
-    if (!empty($this->EFQpropertyConditionsQueries)) {
-      foreach ($this->EFQpropertyConditionsQueries as $key => $subquery) {
-        $column = $this->EFQpropertyConditionsColumns[$key];
-        $select_query->condition("node.$column", $subquery, 'IN');
-      }
-    }
-    $columns = $this->_prep_final_query($select_query, $id_key);
-    if ($this->executeQuery) {
-      return $this->_execute_final_query($select_query, $id_key, $columns);
-    }
-    else {
-      return $select_query;
-    }
+  public function EFQjoin($type, $table, $on, $conditions = array(), $fields = array()) {
+    $this->EFQjoin[] = array($type, $table, $on, $conditions, $fields);
+    return $this;
+  }
+
+  public function EFQpropertyCondition(EntityFieldQueryExtra $efqe_sub, $column) {
+    $efqe_sub->executeQuery = FALSE;
+    $efqe_sub->executeCallback = 'EntityFieldQueryExtra_field_sql_storage_field_storage_query';
+    $this->EFQpropertyConditions[] = array($efqe_sub->execute(), $column);
+    $efqe_sub->executeQuery = TRUE;
+    $efqe_sub->executeCallback = NULL;
+
+    return $this;
   }
 
   public function propertyOrderBy($column, $direction = 'ASC', $table = '') {
@@ -492,7 +481,7 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
    * @return EntityFieldQuery
    *   The called object.
    */
-  public function getFieldValue($field, $column, $join_type = 'LEFT') {
+  public function getFieldValue($field, $column, $join_type = 'LEFT', $base_table = array()) {
     // Add field to the main query.
     if (is_scalar($field)) {
       $field_definition = field_info_field($field);
@@ -511,6 +500,8 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
       'column' => $column,
       'index' => $index,
       'join_type' => $join_type,
+      'base_table' => $base_table,
+      'field' => $field,
     );
     $this->addedFields[$field['field_name'] . '_' . $column] = $added_fields;
     return $this;
@@ -565,6 +556,30 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
   }
 
   /**
+   * Finishes the query.
+   *
+   * Adds tags, meta data, range and returns the requested list or count.
+   *
+   * @param SelectQuery $select_query
+   *   A SelectQuery which has entity_type, entity_id, revision_id and bundle
+   *   fields added.
+   * @param string $id_key
+   *   Which field's values to use as the returned array keys.
+   *
+   * @return
+   *   See EntityFieldQuery::execute().
+   */
+  function finishQuery($select_query, $id_key = 'entity_id') {
+    $columns = $this->_prep_final_query($select_query, $id_key);
+    if ($this->executeQuery) {
+      return $this->_execute_final_query($select_query, $id_key, $columns);
+    }
+    else {
+      return $select_query;
+    }
+  }
+
+  /**
    * Check if the field already has a table that does a join.
    *
    * @param array $field
@@ -590,6 +605,59 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
   }
 
   private function _prep_final_query($select_query, $id_key = 'entity_id') {
+    // Do nested condition.
+    if (!empty($this->EFQpropertyConditions)) {
+      foreach ($this->EFQpropertyConditions as $values) {
+        $select_query->condition("node.$values[1]", $values[0], 'IN');
+      }
+    }
+
+    // Do EFQ join.
+    if (!empty($this->EFQjoin)) {
+      // Get base table for join.
+      $tables =& $select_query->getTables();
+      $base_table = '';
+      foreach ($tables as &$t) {
+        if (is_null($t['join type']) && is_null($t['condition'])) {
+          $base_table = $t['alias'];
+          break;
+        }
+      }
+      foreach ($this->EFQjoin as $k => $values) {
+        // Set initial values.
+        list($type, $table, $on, $conditions, $fields) = $values;
+        $table_alias = $table . $k;
+
+        // Get row from base table to join on.
+        $row = $on;
+        if (empty($this->changeBaseTable)) {
+          $row = $id_key;
+        }
+
+        // Build conditions and arguments.
+        $condition = "$table_alias.$on = $base_table.$row";
+        $arguments = array();
+        if (!empty($conditions)) {
+          foreach ($conditions as $i => $join_condition) {
+            $property_condition['column'] = $join_condition[0];
+            $property_condition['value'] = $join_condition[1];
+            $property_condition['operator'] = isset($join_condition[2]) ? $join_condition[2] : NULL;
+            $key = "${k}_${i}";
+            $condition .= " AND $table_alias.$join_condition[0] " . EntityFieldQueryExtra_get_op($property_condition) . ' ' . EntityFieldQueryExtra_get_args($property_condition, $key);
+            $arguments += EntityFieldQueryExtra_get_args_values($property_condition, $key);
+          }
+        }
+        $select_query->addJoin($type, $table, $table_alias, $condition, $arguments);
+
+        // Add in fields.
+        if (!empty($fields)) {
+          foreach ($fields as $field => $field_alias) {
+            $select_query->addField($table_alias, $field, $field_alias);
+          }
+        }
+      }
+    }
+
     // Iterate through all fields. If the query is trying to fetch results
     // where a field is null, then alter the query to use a LEFT OUTER join.
     // Otherwise the query will always return 0 results.
@@ -621,8 +689,42 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
       return $select_query->countQuery()->execute()->fetchField();
     }
 
-    // Our modified code.
+    // Change join condition if base table is changing.
     $columns = array();
+    foreach($this->addedFields as $addedField) {
+      if (empty($addedField['base_table'])) {
+        continue;
+      }
+      $sql_table = key($addedField['field']['storage']['details']['sql']['FIELD_LOAD_CURRENT']);
+      $tables =& $select_query->getTables();
+      $base_table_col = reset($addedField['base_table']);
+      $base_table_alias = key($addedField['base_table']);
+      $counter_a = 0;
+      foreach ($tables as &$table) {
+        $counter_a++;
+        if ($table['table'] == $base_table_alias) {
+          $base_table_alias = $table['alias'];
+          break;
+        }
+      }
+      $counter_b = 0;
+      $moved_tables = array();
+      foreach ($tables as $k => &$table) {
+        $counter_b++;
+        if ($table['table'] != $sql_table) {
+          continue;
+        }
+        $table_alias = $table['alias'];
+        $table['condition'] = "$base_table_alias.$base_table_col = $table_alias.$id_key";
+        if ($counter_a > $counter_b) {
+          $moved_tables[$k] = $table;
+          unset($tables[$k]);
+        }
+      }
+      $tables += $moved_tables;
+    }
+
+    // Get field value.
     foreach($this->addedFields as $addedField) {
       $fields = $select_query->getFields();
       if (!empty($addedField['field_name'])) {
@@ -647,6 +749,8 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
       }
       $columns[] = $column;
     }
+
+    // Get property value.
     if (!empty($this->addedProperties)) {
       // Get the entity base table.
       if (isset($this->entityConditions['entity_type']['value'])) {
@@ -718,6 +822,8 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
         }
       }
     }
+
+    // Adjust order.
     if (!empty($this->order)) {
       foreach ($this->order as $order) {
         if ($order['type'] == 'alt_base_table_property') {
