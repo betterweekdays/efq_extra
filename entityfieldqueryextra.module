@@ -494,16 +494,27 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
     // Save the index used for the new field, for later use in field storage.
     $index = $this->saveFieldIndex($field);
 
-    // Save data needed in the finishQuery() method.
-    $added_fields = array(
-      'field_name' => $field['field_name'],
-      'column' => $column,
-      'index' => $index,
-      'join_type' => $join_type,
-      'base_table' => $base_table,
-      'field' => $field,
-    );
-    $this->addedFields[$field['field_name'] . '_' . $column] = $added_fields;
+    $columns = array();
+    if ($column == '#ALL') {
+      foreach ($field['columns'] as $column => $values) {
+        $columns[] = $column;
+      }
+    }
+    else {
+      $columns[] = $column;
+    }
+    foreach ($columns as $column) {
+      // Save data needed in the finishQuery() method.
+      $added_fields = array(
+        'field_name' => $field['field_name'],
+        'column' => $column,
+        'index' => $index,
+        'join_type' => $join_type,
+        'base_table' => $base_table,
+        'field' => $field,
+      );
+      $this->addedFields[$field['field_name'] . '_' . $column] = $added_fields;
+    }
     return $this;
   }
 
