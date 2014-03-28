@@ -1,7 +1,376 @@
 <?php
 
 /**
- * Implements hook_field_storage_query().
+ * Implements hook_entity_info_alter().
+ */
+function EntityFieldQueryExtra_entity_info_alter(&$entity_info) {
+  // Add in missing info for comments.
+  if (!empty($entity_info['comment']) && empty($entity_info['comment']['bundle keys']['bundle'])) {
+    $entity_info['comment']['bundle keys']['bundle'] = 'type';
+  }
+}
+
+/**
+ * Implements hook_field_views_data_alter().
+ */
+function EntityFieldQueryExtra_field_views_data_alter(&$result, $field, $module) {
+  foreach ($result as $key => &$values) {
+    if (isset($values[$field['field_name']]['field']['handler']) && $values[$field['field_name']]['field']['handler'] == 'views_handler_field_field') {
+      $values[$field['field_name']]['field']['handler'] = 'EntityFieldQueryExtra_views_handler_field_field';
+    }
+  }
+}
+
+/**
+ * EFQE Alt to entity_load_multiple().
+ *
+ * @param string $entity_type
+ *   The entity type to load, e.g. node or user.
+ * @param array $ids
+ *   An array of entity IDs, or FALSE to load all entities.
+ *
+ * @return array
+ *   An array of entity objects indexed by their ids. When no results are found,
+ *   an empty array is returned.
+ */
+function EntityFieldQueryExtra_entity_load_multiple($entity_type, $ids) {
+  $query = new EntityFieldQueryExtra();
+  $entity_lut = EFQE_entity_lut($entity_type);
+
+  $query
+    ->entityCondition('entity_type', $entity_lut['type'])
+    ->propertyCondition($entity_lut['id'], $ids)
+    ->addTag('DANGEROUS_ACCESS_CHECK_OPT_OUT');
+  $results = $query->executeEntityBuildAll();
+  $entities = $results[$entity_lut['name']];
+  return $entities;
+}
+
+/**
+ * A field that displays fieldapi fields.
+ *
+ * @ingroup views_field_handlers
+ */
+class EntityFieldQueryExtra_views_handler_field_field extends views_handler_field_field {
+  /**
+   * Load the entities for all fields that are about to be displayed.
+   */
+  function post_execute(&$values) {
+    // Uncomment this line to disable EFQE Views.
+//     return views_handler_field_field::post_execute($values);
+
+    // Do nothing if $values is empty
+    if (empty($values)) {
+      return;
+    }
+
+    // Divide the entity ids by entity type, so they can be loaded in bulk.
+    $entities_by_type = array();
+    $revisions_by_type = array();
+    $fields_by_type = array();
+    foreach ($values as $key => $object) {
+      if (   !isset($this->aliases['entity_type'])
+          || !isset($object->{$this->aliases['entity_type']})
+          || !isset($object->{$this->field_alias})
+          || isset($values[$key]->_field_data[$this->field_alias])
+          ) {
+        continue;
+      }
+
+      $entity_type = $object->{$this->aliases['entity_type']};
+      if (empty($this->definition['is revision'])) {
+        $entity_id = $object->{$this->field_alias};
+        $entities_by_type[$entity_type][$key] = $entity_id;
+      }
+      else {
+        $revision_id = $object->{$this->field_alias};
+        $entity_id = $object->{$this->aliases['entity_id']};
+        $entities_by_type[$entity_type][$key] = array($entity_id, $revision_id);
+      }
+      foreach ($object as $row_id => $value) {
+        if (strpos($row_id, 'field_data_field_') === FALSE) {
+          continue;
+        }
+        $pos = strrpos($row_id, "_${value}_entity_type");
+        if ($pos === FALSE) {
+          continue;
+        }
+
+        // Add in requested field.
+        $field_name = substr($row_id, 11, $pos - 11);
+        // Skip if this was already added.
+        if (array_key_exists($entity_type, $fields_by_type) && array_key_exists($field_name, $fields_by_type[$entity_type])) {
+          continue;
+        }
+        $fields_by_type[$entity_type][$field_name] = $field_name;
+
+        // Add in additional fields.
+        $len = strlen("_${value}_entity");
+        foreach ($this->view->query->fields as $name => $data) {
+          $pos = strrpos($name, "_${value}_entity");
+          if ($pos !== FALSE && strlen($name) == $len + $pos) {
+            $views_field_name = substr($name, 11, $pos - 11);
+            $fields_by_type[$entity_type][$views_field_name] = $views_field_name;
+          }
+        }
+      }
+    }
+
+    // Load the entities.
+    foreach ($entities_by_type as $entity_type => $entity_ids) {
+      $entity_info = entity_get_info($entity_type);
+      if (empty($this->definition['is revision'])) {
+        $entities = array();
+        $entity_lut = EFQE_entity_lut($entity_type);
+
+        if (!empty($entity_lut['id'])) {
+          $query = new EntityFieldQueryExtra();
+          $query
+            ->entityCondition('entity_type', $entity_lut['type'])
+            ->propertyCondition($entity_lut['id'], $entity_ids)
+            ->addTag('DANGEROUS_ACCESS_CHECK_OPT_OUT');
+          foreach ($fields_by_type[$entity_lut['type']] as $field) {
+            // Only add in the field if it is appart of this entity type.
+            $field_info = field_info_field($field);
+            if (!empty($field_info['bundles'][$entity_lut['type']])) {
+              $query->getFieldValue($field, '#ALL');
+            }
+          }
+          // Add in all base properties for this entity type.
+          foreach ($entity_lut['schema_fields_sql']['base table'] as $column) {
+            if (!array_key_exists($column, $query->addedProperties)) {
+              $query->getPropertyValue($column);
+            }
+          }
+          $results = $query->executeEntityBuild();
+          $entities = $results[$entity_lut['name']];
+        }
+        // Fallback to entity_load if EFQE failed.
+        if (empty($entities)) {
+          $entities = entity_load($entity_type, $entity_ids);
+        }
+        $keys = $entity_ids;
+      }
+      else {
+        // Revisions can't be loaded multiple, so we have to load them
+        // one by one.
+        $entities = array();
+        $keys = array();
+        foreach ($entity_ids as $key => $combined) {
+          list($entity_id, $revision_id) = $combined;
+          $entity = entity_load($entity_type, array($entity_id), array($entity_info['entity keys']['revision'] => $revision_id));
+          if ($entity) {
+            $entities[$revision_id] = array_shift($entity);
+            $keys[$key] = $revision_id;
+          }
+        }
+      }
+
+      foreach ($keys as $key => $entity_id) {
+        // If this is a revision, load the revision instead.
+        if (isset($entities[$entity_id])) {
+          $values[$key]->_field_data[$this->field_alias] = array(
+            'entity_type' => $entity_type,
+            'entity' => $entities[$entity_id],
+          );
+        }
+      }
+    }
+
+    // Now, transfer the data back into the result set so it can be easily used.
+    foreach ($values as $row_id => &$value) {
+      $value->{'field_' . $this->options['id']} = $this->set_items($value, $row_id);
+    }
+  }
+}
+
+function EFQE_entity_lut($e_type = '', $b_table = '', $e_id = '') {
+  // Use the advanced drupal_static() pattern.
+  static $drupal_static_fast;
+  if (!isset($drupal_static_fast)) {
+    $drupal_static_fast['entity_info'] = &drupal_static(__FUNCTION__);
+  }
+  $lut = &$drupal_static_fast['entity_info'];
+
+  // Set $entity_info if it is empty.
+  if (empty($lut)) {
+    $lut = array();
+    $tables = array(
+      'base table' => 'base table schema',
+      'revision table' => 'revision table schema',
+    );
+
+    // 0 = Copy Key & Value.
+    // 1 = Copy Key & Value to top level.
+    // 2 = run array_keys on it.
+    // 3 = get first value in array.
+    $keys_to_copy = array(
+      'plural label' => 0,
+      'base table' => 0,
+      'revision table' => 0,
+      'entity keys' => 1,
+      'bundle keys' => 3,
+      'bundles' => 2,
+      'schema_fields_sql' => 0,
+      'base table schema' => 0,
+      'revision table schema' => 0,
+    );
+    $entity_info = entity_get_info();
+    foreach ($entity_info as $entity_type => &$info) {
+      foreach ($tables as $k => $v) {
+        if (empty($info[$k])) {
+          continue;
+        }
+        $info[$v] = drupal_get_schema($info[$k]);
+        unset($info[$v]['fields']);
+        if (isset($info[$v]['foreign keys'])) {
+          foreach ($info[$v]['foreign keys'] as $data) {
+            $schema = drupal_get_schema($data['table']);
+            $fields = array_keys($schema['fields']);
+            unset($schema['fields']);
+            $schema['fields'] = $fields;
+            $info[$v]['foreign key tables'][$data['table']] = $schema;
+          }
+        }
+      }
+
+
+      $lut[$entity_type] = array();
+      $lut[$entity_type]['name'] = $entity_type . 's';
+      $lut[$entity_type]['type'] = $entity_type;
+      foreach ($keys_to_copy as $key => $mode) {
+        if (empty($info[$key])) {
+          continue;
+        }
+        if ($mode == 0) {
+          $lut[$entity_type][$key] = $info[$key];
+        }
+        if ($mode == 1) {
+          $lut[$entity_type] += $info[$key];
+        }
+        if ($mode == 2) {
+          $lut[$entity_type][$key] = array_keys($info[$key]);
+        }
+        if ($mode == 3) {
+          $lut[$entity_type][$key] = reset($info[$key]);
+        }
+      }
+
+      if (!empty($lut[$entity_type]['bundle'])) {
+        $base = $lut[$entity_type]['bundle'];
+        $alias = $base;
+        if (!empty($lut[$entity_type]['bundle keys'])) {
+          $base = $lut[$entity_type]['bundle keys'];
+        }
+        foreach ($lut[$entity_type]['schema_fields_sql'] as $type => $fields) {
+          if (in_array($base, $fields)) {
+            $lut[$entity_type]['bundle table info'] = array($lut[$entity_type][$type], $base, $alias);
+          }
+        }
+        // Search for bundle in foreign keys.
+        if (empty($lut[$entity_type]['bundle table info'])) {
+          foreach ($tables as $k => $v) {
+            if (empty($lut[$entity_type][$v]['foreign key tables'])) {
+              continue;
+            }
+            foreach ($lut[$entity_type][$v]['foreign key tables'] as $table_name => $data) {
+              if (in_array($base, $data['fields'])) {
+                $lut[$entity_type]['bundle table info'] = array($table_name, $base, $alias);
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Add in additional info.
+    $lut['comment']['entity field pre processing'] = array(
+      // From CommentController::buildQuery().
+      array(
+        'method' => 'getPropertyValue',
+        'args' => array('name', 'users', 'registered_name'),
+      ),
+      array(
+        'method' => 'getPropertyValue',
+        'args' => array('uid', 'users', 'u_uid'),
+      ),
+      array(
+        'method' => 'getPropertyValue',
+        'args' => array('signature', 'users', 'signature'),
+      ),
+      array(
+        'method' => 'getPropertyValue',
+        'args' => array('signature_format', 'users', 'signature_format'),
+      ),
+      array(
+        'method' => 'getPropertyValue',
+        'args' => array('picture', 'users', 'picture'),
+      ),
+    );
+    $lut['comment']['entity field post processing'] = array(
+      // From CommentController::attachLoad().
+      array(
+        'args' => array('uid', 'registered_name', 'name'),
+        'new_key' => 'name',
+        'function' => 'efqe_comment_name',
+      ),
+      array(
+        'args' => array('nid', 'changed'),
+        'new_key' => 'new',
+        'function' => 'efqe_comment_new',
+      ),
+      array(
+        'args' => array('node_type'),
+        'new_key' => 'node_type',
+        'function' => 'efqe_comment_node_type',
+      ),
+    );
+    $lut['user']['entity field pre processing'] = array(
+      // From UserController::attachLoad().
+      array(
+        'method' => 'getPropertyValue',
+        'args' => array('roles'),
+      ),
+    );
+  }
+
+  // Return the values.
+  if (!empty($e_type)) {
+    return $lut[$e_type];
+  }
+  if (!empty($b_table)) {
+    foreach ($lut as $values) {
+      if ($values['base table'] == $b_table) {
+        return $values;
+      }
+    }
+    return array();
+  }
+  if (!empty($e_id)) {
+    foreach ($lut as $values) {
+      if ($values['id'] == $e_id) {
+        return $values;
+      }
+    }
+    return array();
+  }
+  return $lut;
+}
+
+function efqe_comment_name($uid, $registered_name, $name) {
+  return $uid ? $registered_name : $name;
+}
+
+function efqe_comment_new($nid, $changed) {
+  return node_mark($nid, $changed);
+}
+
+function efqe_comment_node_type($type) {
+  return 'comment_node_' . $type;
+}
+
+/**
+ * Alternative version of field_sql_storage_field_storage_query().
  */
 function EntityFieldQueryExtra_field_sql_storage_field_storage_query(EntityFieldQuery $query) {
   if ($query->age == FIELD_LOAD_CURRENT) {
@@ -19,12 +388,10 @@ function EntityFieldQueryExtra_field_sql_storage_field_storage_query(EntityField
     $select_query = db_select($query->changeBaseTable, $query->changeBaseTable);
     $field_base_table = $query->changeBaseTable;
     $first = FALSE;
-    if ($field_base_table == 'node') {
-      $base_id = 'nid';
-    }
-    if ($field_base_table == 'users') {
-      $base_id = 'uid';
-    }
+
+    $entity_lut = EFQE_entity_lut('', $field_base_table);
+    $base_id = $entity_lut['id'];
+
     $select_query->addField($field_base_table, $base_id);
   }
   // Add tables for the fields used.
@@ -210,7 +577,7 @@ function EntityFieldQueryExtra_get_args_values($property_condition, $key) {
   return $return;
 }
 
-function EntityFieldQueryExtra_entity_create($values, $field_names) {
+function EntityFieldQueryExtra_entity_create($values, $field_names, $entity_lut) {
   $object = new stdClass();
   foreach ($values as $k => $v) {
     if (!array_key_exists($k, $field_names)) {
@@ -241,6 +608,23 @@ function EntityFieldQueryExtra_entity_create($values, $field_names) {
       $object->{'data'} = $data;
     }
   }
+
+  // Preform any post processing.
+  if (!empty($entity_lut['entity field post processing'])) {
+    foreach ($entity_lut['entity field post processing'] as $rule) {
+      if (!empty($rule['function']) && is_callable($rule['function'])) {
+        $args = array();
+        foreach ($rule['args'] as $arg) {
+          $args[] = isset($object->{$arg}) ? $object->{$arg} : NULL;
+        }
+        $object->{$rule['new_key']} = call_user_func_array($rule['function'], $args);
+      }
+      else {
+        $object->{$rule['new_key']} = $object->$rule['old_key'];
+      }
+    }
+  }
+
   return $object;
 }
 
@@ -250,7 +634,6 @@ function EntityFieldQueryExtra_entity_create_kill_null(&$object) {
       continue;
     }
     $all_null = TRUE;
-//     echo httprl_pr($values['und']);
     foreach ($values['und'] as $delta => $data) {
       foreach ($data as $info) {
         if (!is_null($info)) {
@@ -269,33 +652,30 @@ function EntityFieldQueryExtra_entity_create_kill_null(&$object) {
 class EntityFieldQueryExtra extends EntityFieldQuery {
   // Variables used internally.
   private $addedFields = array();
-  private $addedProperties = array();
   private $showQuery = FALSE;
   private $printQuery = FALSE;
   private $EFQpropertyConditions = array();
   private $EFQjoin = array();
 
   // Variables used internally & externally.
+  public $addedProperties = array();
   public $changeBaseTable = FALSE;
   public $executeQuery = TRUE;
   public $entity_type = NULL;
   public $bundle = NULL;
   public $get_user_roles = FALSE;
+  public $fields_to_entity = array();
 
   public function executeEntityLoad() {
-    $results = $this->execute();
-    $keys = array(
-      'node' => 'nodes',
-      'user' => 'users',
-    );
-    foreach ($keys as $i => $j) {
-      // Skip if top level type does not exist.
-      if (!isset($results[$i])) {
-        continue;
-      }
-      $eid = array_keys($results[$i]);
-      $results[$j] = entity_load($i, $eid);
+    if (isset($this->entityConditions['entity_type']['value'])) {
+      $entity_type = $this->entityConditions['entity_type']['value'];
     }
+    $entity_lut = EFQE_entity_lut($entity_type);
+
+    $results = $this->execute();
+    $eid = array_keys($results[$entity_lut['type']]);
+    $results[$entity_lut['name']] = entity_load($i, $eid);
+
     return $results;
   }
 
@@ -309,26 +689,41 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
         $bundle_name = $this->entityConditions['bundle']['value'];
       }
     }
+
     // Get all Properties.
-    $entity = entity_get_info($entity_type);
-    $properties = $entity['schema_fields_sql']['base table'];
+    $entity_info = entity_get_info($entity_type);
+    $properties = $entity_info['schema_fields_sql']['base table'];
     foreach ($properties as $column) {
       if (!array_key_exists($column, $this->addedProperties)) {
         $this->getPropertyValue($column);
       }
     }
 
-    // Get user roles.
-    $this->getPropertyValue('roles');
+    // Get user roles if base table has a uid.
+    if (in_array('uid', $properties)) {
+      $this->getPropertyValue('roles');
+    }
 
     // Get all fields.
     $fields_info = field_info_instances($entity_type, $bundle_name);
     $field_output = array();
     if (is_null($bundle_name)) {
-      foreach ($fields_info[$entity_type] as $field_name => $value) {
-        $field_info = field_info_field($field_name);
-        $output = reset($field_info['storage']['details']['sql']['FIELD_LOAD_CURRENT']);
-        $field_output[$field_name] = array_keys($output);
+      if (isset($fields_info[$entity_type])) {
+        foreach ($fields_info[$entity_type] as $field_name => $value) {
+          $field_info = field_info_field($field_name);
+          $output = reset($field_info['storage']['details']['sql']['FIELD_LOAD_CURRENT']);
+          $field_output[$field_name] = array_keys($output);
+        }
+      }
+      else {
+        // Need to group joins into a select join by $bundle_name in order to avoid the 61 table limit.
+        foreach ($fields_info as $bundle_name => $bundle_fields) {
+          foreach ($bundle_fields as $field_name => $value) {
+            $field_info = field_info_field($field_name);
+            $output = reset($field_info['storage']['details']['sql']['FIELD_LOAD_CURRENT']);
+            $field_output[$field_name] = array_keys($output);
+          }
+        }
       }
     }
     else {
@@ -352,35 +747,33 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
   }
 
   public function executeEntityBuild() {
-    $results = $this->execute();
-    $keys = array(
-      'node' => 'nodes',
-      'user' => 'users',
-    );
-    foreach ($keys as $i => $j) {
-      // Skip if top level type does not exist.
-      if (!isset($results[$i])) {
-        continue;
-      }
+    if (isset($this->entityConditions['entity_type']['value'])) {
+      $entity_type = $this->entityConditions['entity_type']['value'];
+    }
+    $entity_lut = EFQE_entity_lut($entity_type);
 
-      $results[$j] = array();
-      foreach($results[$i] as $id => $values) {
-        $results[$j][$id] = $this->entity_create($values);
+    // Add in bundle table fields.
+    if (!empty($entity_lut['bundle table info'])) {
+      $this->getPropertyValue($entity_lut['bundle table info'][1], $entity_lut['bundle table info'][0], $entity_lut['bundle table info'][2]);
+    }
+
+    // Add in any additional fields.
+    if (!empty($entity_lut['entity field pre processing'])) {
+      foreach ($entity_lut['entity field pre processing'] as $pre_process) {
+        if (isset($pre_process['method']) && is_callable(array($this, $pre_process['method']))) {
+          call_user_func_array(array($this, $pre_process['method']), $pre_process['args']);
+        }
+      }
+    }
+
+    $results = $this->execute();
+    $results[$entity_lut['name']] = array();
+    if (!empty($results[$entity_lut['type']])) {
+      foreach($results[$entity_lut['type']] as $id => $values) {
+        $results[$entity_lut['name']][$id] = EntityFieldQueryExtra_entity_create($values, $this->fields_to_entity, $entity_lut);
       }
     }
     return $results;
-  }
-
-  function entity_create($values) {
-    $field_names = array();
-    foreach ($this->addedFields as $fields) {
-      $field_names[$fields['field_name'] . '_' . $fields['column']] = array(
-        $fields['field_name'],
-        $fields['column'],
-      );
-    }
-
-    return EntityFieldQueryExtra_entity_create($values, $field_names);
   }
 
   public function execute() {
@@ -431,8 +824,8 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
     return parent::execute();
   }
 
-  public function EFQjoin($type, $table, $on, $conditions = array(), $fields = array()) {
-    $this->EFQjoin[] = array($type, $table, $on, $conditions, $fields);
+  public function EFQjoin($type, $table, $on, $conditions = array(), $fields = array(), $alt_base_table = '') {
+    $this->EFQjoin[] = array($type, $table, $on, $conditions, $fields, $alt_base_table);
     return $this;
   }
 
@@ -514,6 +907,7 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
         'field' => $field,
       );
       $this->addedFields[$field['field_name'] . '_' . $column] = $added_fields;
+      $this->fields_to_entity[$field['field_name'] . '_' . $column] = array($field['field_name'], $column);
     }
     return $this;
   }
@@ -527,11 +921,12 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
    * @return EntityFieldQuery
    *   The called object.
    */
-  public function getPropertyValue($column, $base_table = '') {
+  public function getPropertyValue($column, $base_table = '', $alias = '') {
     // Save data needed in the finishQuery() method.
-    $this->addedProperties[$column.$base_table] = array(
+    $this->addedProperties[$column.$base_table.$alias] = array(
       $column,
       $base_table,
+      $alias,
     );
     return $this;
   }
@@ -615,6 +1010,101 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
     return $index;
   }
 
+  function _join_foreign_keys(&$select_query, $id_key) {
+    foreach ($this->addedFields as $fields) {
+      if (empty($fields['field']['foreign keys'])) {
+        continue;
+      }
+      foreach ($fields['field']['foreign keys'] as $key => $info) {
+        if ($key != $fields['column']) {
+          continue;
+        }
+        $entity_lut = EFQE_entity_lut('', '', $key);
+        if (empty($entity_lut)) {
+          continue;
+        }
+        // Get all Properties.
+        $properties = $entity_lut['schema_fields_sql']['base table'];
+        $columns = array();
+        foreach ($properties as $column) {
+          $columns[$column] = $fields['field_name'] . '_' . $column;
+          $this->fields_to_entity[$fields['field_name'] . '_' . $column] = array(
+            $fields['field_name'],
+            $column,
+          );
+        }
+        $sql_table = key($fields['field']['storage']['details']['sql']['FIELD_LOAD_CURRENT']);
+        $on = $fields['field']['storage']['details']['sql']['FIELD_LOAD_CURRENT'][$sql_table][$key];
+
+        // Add in the join.
+        $this->EFQjoin('LEFT', $entity_lut['base table'], array($entity_lut['id'], $on), array(), $columns, $sql_table);
+      }
+    }
+  }
+
+  private function _prep_efq_join(&$select_query, $id_key = 'entity_id') {
+    // Get base table for join.
+    $tables =& $select_query->getTables();
+    $base_table = '';
+    foreach ($tables as &$t) {
+      if (is_null($t['join type']) && is_null($t['condition'])) {
+        $base_table = $t['alias'];
+        break;
+      }
+    }
+
+    foreach ($this->EFQjoin as $k => $values) {
+      // Set initial values.
+      list($type, $table, $on, $conditions, $fields, $alt_base_table) = $values;
+      $table_alias = $table . $k;
+
+      // Get row from base table to join on.
+      if (is_array($on)) {
+        $row = $on[1];
+        $on = $on[0];
+      }
+      else {
+        $row = $on;
+      }
+      if (empty($alt_base_table)) {
+        $alt_base_table = $base_table;
+        if (empty($this->changeBaseTable)) {
+          $row = $id_key;
+        }
+      }
+      else {
+        foreach ($tables as &$t) {
+          if ($t['table'] == $alt_base_table) {
+            $alt_base_table = $t['alias'];
+            break;
+          }
+        }
+      }
+
+      // Build conditions and arguments.
+      $condition = "$table_alias.$on = $alt_base_table.$row";
+      $arguments = array();
+      if (!empty($conditions)) {
+        foreach ($conditions as $i => $join_condition) {
+          $property_condition['column'] = $join_condition[0];
+          $property_condition['value'] = $join_condition[1];
+          $property_condition['operator'] = isset($join_condition[2]) ? $join_condition[2] : NULL;
+          $key = "${k}_${i}";
+          $condition .= " AND $table_alias.$join_condition[0] " . EntityFieldQueryExtra_get_op($property_condition) . ' ' . EntityFieldQueryExtra_get_args($property_condition, $key);
+          $arguments += EntityFieldQueryExtra_get_args_values($property_condition, $key);
+        }
+      }
+      $select_query->addJoin($type, $table, $table_alias, $condition, $arguments);
+
+      // Add in fields.
+      if (!empty($fields)) {
+        foreach ($fields as $field => $field_alias) {
+          $select_query->addField($table_alias, $field, $field_alias);
+        }
+      }
+    }
+  }
+
   private function _prep_final_query($select_query, $id_key = 'entity_id') {
     // Do nested condition.
     if (!empty($this->EFQpropertyConditions)) {
@@ -623,50 +1113,12 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
       }
     }
 
+    // Join foreign keys.
+    $this->_join_foreign_keys($select_query, $id_key);
+
     // Do EFQ join.
     if (!empty($this->EFQjoin)) {
-      // Get base table for join.
-      $tables =& $select_query->getTables();
-      $base_table = '';
-      foreach ($tables as &$t) {
-        if (is_null($t['join type']) && is_null($t['condition'])) {
-          $base_table = $t['alias'];
-          break;
-        }
-      }
-      foreach ($this->EFQjoin as $k => $values) {
-        // Set initial values.
-        list($type, $table, $on, $conditions, $fields) = $values;
-        $table_alias = $table . $k;
-
-        // Get row from base table to join on.
-        $row = $on;
-        if (empty($this->changeBaseTable)) {
-          $row = $id_key;
-        }
-
-        // Build conditions and arguments.
-        $condition = "$table_alias.$on = $base_table.$row";
-        $arguments = array();
-        if (!empty($conditions)) {
-          foreach ($conditions as $i => $join_condition) {
-            $property_condition['column'] = $join_condition[0];
-            $property_condition['value'] = $join_condition[1];
-            $property_condition['operator'] = isset($join_condition[2]) ? $join_condition[2] : NULL;
-            $key = "${k}_${i}";
-            $condition .= " AND $table_alias.$join_condition[0] " . EntityFieldQueryExtra_get_op($property_condition) . ' ' . EntityFieldQueryExtra_get_args($property_condition, $key);
-            $arguments += EntityFieldQueryExtra_get_args_values($property_condition, $key);
-          }
-        }
-        $select_query->addJoin($type, $table, $table_alias, $condition, $arguments);
-
-        // Add in fields.
-        if (!empty($fields)) {
-          foreach ($fields as $field => $field_alias) {
-            $select_query->addField($table_alias, $field, $field_alias);
-          }
-        }
-      }
+      $this->_prep_efq_join($select_query, $id_key);
     }
 
     // Iterate through all fields. If the query is trying to fetch results
@@ -735,8 +1187,42 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
       $tables += $moved_tables;
     }
 
+    // Fix table order so joins work.
+    $tables =& $select_query->getTables();
+    $aliases = array();
+    foreach ($tables as &$table) {
+      $aliases[] = $table['alias'];
+    }
+    $conditions = array();
+    foreach ($tables as &$table) {
+      $conditions[$table['alias']] = array();
+      if (!empty($table['condition'])) {
+        foreach ($aliases as $a) {
+          if (strpos($table['condition'], $a) !== FALSE) {
+            $conditions[$table['alias']][] = $a;
+          }
+        }
+      }
+    }
+    $counter = 0;
+    foreach ($conditions as $k => $v) {
+      $counter++;
+      $test_array = array_slice($aliases, 0, $counter);
+      $diff = array_diff($v, $test_array);
+      if (!empty($diff)) {
+        $table_name = reset($diff);
+        $temp_table = $tables[$k];
+        unset($tables[$k]);
+        $tables[$k] = $temp_table;
+      }
+    }
+
     // Get field value.
-    foreach($this->addedFields as $addedField) {
+    foreach ($this->addedFields as $addedField) {
+      if (empty($addedField['index'])) {
+        continue;
+      }
+
       $fields = $select_query->getFields();
       if (!empty($addedField['field_name'])) {
         // Add field to query.
@@ -761,16 +1247,18 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
       $columns[] = $column;
     }
 
+    // Add in needed properties.
+    // Get the entity base table.
+    if (isset($this->entityConditions['entity_type']['value'])) {
+      $entity_info = entity_get_info($this->entityConditions['entity_type']['value']);
+      $base_table = $entity_info['base table'];
+    }
+    else {
+      $base_table = $this->changeBaseTable;
+    }
+
     // Get property value.
     if (!empty($this->addedProperties)) {
-      // Get the entity base table.
-      if (isset($this->entityConditions['entity_type']['value'])) {
-        $entity_info = entity_get_info($this->entityConditions['entity_type']['value']);
-        $base_table = $entity_info['base table'];
-      }
-      else {
-        $base_table = $this->changeBaseTable;
-      }
       foreach($this->addedProperties as $key => $column) {
         if ($column[0] == 'roles') {
           // Special case for user roles.
@@ -778,6 +1266,7 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
           $users_role_alias = 'users_roles_' . $key;
           $users_role_alias_found = FALSE;
           $role_alias_found = FALSE;
+          $base_table_found = FALSE;
 
           // Reuse tables if possible.
           $tables =& $select_query->getTables();
@@ -790,9 +1279,19 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
               $role_alias = $table['alias'];
               $role_alias_found = TRUE;
             }
+            if ($table['table'] == $base_table) {
+              $base_table_found = TRUE;
+            }
           }
           if (empty($users_role_alias_found)) {
-            $select_query->join('users_roles', $users_role_alias, "$users_role_alias.uid = $base_table.uid");
+            // Handle if the users table is not joined.
+            $base_table_key = 'uid';
+            if (!$base_table_found) {
+              $first = reset($tables);
+              $base_table = $first['alias'];
+              $base_table_key = 'entity_id';
+            }
+            $select_query->join('users_roles', $users_role_alias, "$users_role_alias.uid = $base_table.$base_table_key");
           }
           if (empty($role_alias_found)) {
             $select_query->join('role', $role_alias, "$role_alias.rid = $users_role_alias.rid");
@@ -805,8 +1304,14 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
         else {
           // Add property to query.
           if (empty($column[1])) {
-            $select_query->addField($base_table, $column[0]);
-            $columns[] = $column[0];
+            if (empty($column[2])) {
+              $select_query->addField($base_table, $column[0]);
+              $columns[] = $column[0];
+            }
+            else {
+              $select_query->addField($base_table, $column[0], $column[2]);
+              $columns[] = $column[2];
+            }
           }
           else {
             // Reuse tables if possible.
@@ -819,16 +1324,18 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
               }
             }
             if (empty($temp_base_table_found)) {
-              if ($column[1] == 'users') {
-                $id = 'uid';
-              }
-              if ($column[1] == 'node') {
-                $id = 'nid';
-              }
-              $select_query->join($temp_base_table, $temp_base_table, "$temp_base_table.$id = $base_table.$id");
+              $entity_lut = EFQE_entity_lut('', $temp_base_table);
+              $base_id = $entity_lut['id'];
+              $select_query->join($temp_base_table, $temp_base_table, "$temp_base_table.$base_id = $base_table.$base_id");
             }
-            $select_query->addField($temp_base_table, $column[0], $column[1] . '_' . $column[0]);
-            $columns[] = $column[1] . '_' . $column[0];
+            if (empty($column[2])) {
+              $select_query->addField($temp_base_table, $column[0], $column[1] . '_' . $column[0]);
+              $columns[] = $column[1] . '_' . $column[0];
+            }
+            else {
+              $select_query->addField($temp_base_table, $column[0], $column[2]);
+              $columns[] = $column[2];
+            }
           }
         }
       }
