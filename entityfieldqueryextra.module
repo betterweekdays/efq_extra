@@ -1152,41 +1152,6 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
       return $select_query->countQuery()->execute()->fetchField();
     }
 
-    // Change join condition if base table is changing.
-    $columns = array();
-    foreach($this->addedFields as $addedField) {
-      if (empty($addedField['base_table'])) {
-        continue;
-      }
-      $sql_table = key($addedField['field']['storage']['details']['sql']['FIELD_LOAD_CURRENT']);
-      $tables =& $select_query->getTables();
-      $base_table_col = reset($addedField['base_table']);
-      $base_table_alias = key($addedField['base_table']);
-      $counter_a = 0;
-      foreach ($tables as &$table) {
-        $counter_a++;
-        if ($table['table'] == $base_table_alias) {
-          $base_table_alias = $table['alias'];
-          break;
-        }
-      }
-      $counter_b = 0;
-      $moved_tables = array();
-      foreach ($tables as $k => &$table) {
-        $counter_b++;
-        if ($table['table'] != $sql_table) {
-          continue;
-        }
-        $table_alias = $table['alias'];
-        $table['condition'] = "$base_table_alias.$base_table_col = $table_alias.$id_key";
-        if ($counter_a > $counter_b) {
-          $moved_tables[$k] = $table;
-          unset($tables[$k]);
-        }
-      }
-      $tables += $moved_tables;
-    }
-
     // Fix table order so joins work.
     $tables =& $select_query->getTables();
     $aliases = array();
@@ -1219,31 +1184,21 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
 
     // Get field value.
     foreach ($this->addedFields as $addedField) {
-      if (empty($addedField['index'])) {
-        continue;
-      }
+      // Add field to query.
+      $column = $addedField['field_name'] . '_' . $addedField['column'];
+      $table_name = 'field_data_' . $addedField['field_name'] . $addedField['index'];
+      $select_query->addField($table_name, $column);
 
-      $fields = $select_query->getFields();
-      if (!empty($addedField['field_name'])) {
-        // Add field to query.
-        $column = $addedField['field_name'] . '_' . $addedField['column'];
-        $table_name = 'field_data_' . $addedField['field_name'] . $addedField['index'];
-        $select_query->addField($table_name, $column);
-
-        // Change join type if requested to do so.
-        if (!empty($addedField['join_type'])) {
-          $tables =& $select_query->getTables();
-          foreach ($tables as &$table) {
-            if ($table['alias'] == $table_name && !is_null($table['join type'])) {
-              $table['join type'] = $addedField['join_type'];
-            }
+      // Change join type if requested to do so.
+      if (!empty($addedField['join_type'])) {
+        $tables =& $select_query->getTables();
+        foreach ($tables as &$table) {
+          if ($table['alias'] == $table_name && !is_null($table['join type'])) {
+            $table['join type'] = $addedField['join_type'];
           }
         }
       }
-      else {
-        $column = $addedField['column'];
-        $select_query->addField($fields['entity_id']['table'], $column);
-      }
+
       $columns[] = $column;
     }
 
