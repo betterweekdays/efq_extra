@@ -1183,6 +1183,7 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
     }
 
     // Get field value.
+    $columns = array();
     foreach ($this->addedFields as $addedField) {
       // Add field to query.
       $column = $addedField['field_name'] . '_' . $addedField['column'];
