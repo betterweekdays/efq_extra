@@ -598,6 +598,7 @@ function EntityFieldQueryExtra_entity_create($values, $field_names, $entity_lut)
       $object->{$field_names[$k][0]}['und'][0][$field_names[$k][1]] = $v;
     }
   }
+
   // Remove empty fields.
   EntityFieldQueryExtra_entity_create_kill_null($object, $values, $field_names);
 
@@ -665,6 +666,12 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
   public $bundle = NULL;
   public $get_user_roles = FALSE;
   public $fields_to_entity = array();
+  public $remove_ordered_results = FALSE;
+
+  public function removeOrderedResults() {
+    $this->remove_ordered_results = TRUE;
+    return $this;
+  }
 
   public function executeEntityLoad() {
     if (isset($this->entityConditions['entity_type']['value'])) {
@@ -1152,6 +1159,60 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
       return $select_query->countQuery()->execute()->fetchField();
     }
 
+    // Change join condition if base table is changing.
+    $columns = array();
+    foreach($this->addedFields as $addedField) {
+      if (empty($addedField['base_table'])) {
+        continue;
+      }
+      $sql_table = key($addedField['field']['storage']['details']['sql']['FIELD_LOAD_CURRENT']);
+      $tables =& $select_query->getTables();
+      $base_table_col = reset($addedField['base_table']);
+      $base_table_alias = key($addedField['base_table']);
+      $counter_a = 0;
+      $table_found = FALSE;
+      foreach ($tables as &$table) {
+        $counter_a++;
+        if ($table['table'] == $base_table_alias) {
+          if (isset($addedField['field']['bundles'][$base_table_alias])) {
+            $bundle_type = reset($addedField['field']['bundles'][$base_table_alias]);
+            if (in_array($bundle_type, $table['arguments'])) {
+              $base_table_alias = $table['alias'];
+              $table_found = TRUE;
+              break;
+            }
+          }
+        }
+      }
+      if (!$table_found) {
+        $counter_a = 0;
+        $table_found = FALSE;
+        foreach ($tables as &$table) {
+          $counter_a++;
+          if ($table['table'] == $base_table_alias) {
+            $base_table_alias = $table['alias'];
+            $table_found = TRUE;
+            break;
+          }
+        }
+      }
+      $counter_b = 0;
+      $moved_tables = array();
+      foreach ($tables as $k => &$table) {
+        $counter_b++;
+        if ($table['table'] != $sql_table) {
+          continue;
+        }
+        $table_alias = $table['alias'];
+        $table['condition'] = "$base_table_alias.$base_table_col = $table_alias.$id_key";
+        if ($counter_a > $counter_b) {
+          $moved_tables[$k] = $table;
+          unset($tables[$k]);
+        }
+      }
+      $tables += $moved_tables;
+    }
+
     // Fix table order so joins work.
     $tables =& $select_query->getTables();
     $aliases = array();
@@ -1319,68 +1380,121 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
       $return['#query'] = $this->_get_query_string($select_query);
     }
 
+    if (isset($this->entityConditions['entity_type']['value'])) {
+      $entity_type = $this->entityConditions['entity_type']['value'];
+      $base_entity_lut = EFQE_entity_lut($entity_type);
+      $base_columns = $base_entity_lut['schema_fields_sql']['base table'];
+      $base_columns[] = 'entity_type';
+      $base_columns[] = 'entity_id';
+      $base_columns[] = 'revision_id';
+      $base_columns[] = 'bundle';
+      $base_columns[] = 'roles';
+    }
+
     // Run the query and iterate over each result returned.
     foreach ($select_query->execute() as $partial_entity) {
-      $bundle = isset($partial_entity->bundle) ? $partial_entity->bundle : $this->bundle;
-      $entity_type = isset($partial_entity->entity_type) ? $partial_entity->entity_type : $this->entity_type;
-      $partial_entity->entity_id = isset($partial_entity->entity_id) ? $partial_entity->entity_id : $partial_entity->$id_key;
-      $revision_id = isset($partial_entity->revision_id) ? $partial_entity->revision_id : NULL;
-      $entity = entity_create_stub_entity($entity_type, array($partial_entity->entity_id, $revision_id, $bundle));
-      // Add in the additional fields to the entity stub.
-      foreach ($partial_entity as $key => $value) {
-        $entity->{$key} = $value;
-      }
-      foreach ($columns as $column_name) {
-        if (!isset($partial_entity->{$column_name})) {
-          $entity->{$column_name} = NULL;
-        }
-      }
-      if (!isset($return[$entity_type][$partial_entity->$id_key])) {
-        $return[$entity_type][$partial_entity->$id_key] = $entity;
-      }
-      else {
-        // Handle multiple delta values.
-        foreach ($entity as $k => $v) {
-          // Special case roles.
-          if ($k == 'roles' && is_null($v)) {
-            continue;
-          }
-          if ($return[$entity_type][$partial_entity->$id_key]->$k != $v) {
-            if (!is_array($return[$entity_type][$partial_entity->$id_key]->$k)) {
-              $temp = $return[$entity_type][$partial_entity->$id_key]->$k;
-              unset($return[$entity_type][$partial_entity->$id_key]->$k);
-              $return[$entity_type][$partial_entity->$id_key]->{$k} = array($temp);
-            }
-            $return[$entity_type][$partial_entity->$id_key]->{$k}[] = $v;
-          }
-        }
-      }
-      // Handle roles.
-      if (isset($this->addedProperties['roles'])) {
-        // Add in core default roles.
-        if (isset($return[$entity_type][$partial_entity->$id_key]->{'uid'})) {
-          if ($return[$entity_type][$partial_entity->$id_key]->{'uid'}) {
-            $return[$entity_type][$partial_entity->$id_key]->{'roles'}[DRUPAL_AUTHENTICATED_RID] = 'authenticated user';
-          }
-          else {
-            $return[$entity_type][$partial_entity->$id_key]->{'role_names'}[DRUPAL_ANONYMOUS_RID] = 'anonymous user';
-          }
-        }
-
-        // Add in set roles.
-        if (!empty($return[$entity_type][$partial_entity->$id_key]->{'role_names'}) && !empty($return[$entity_type][$partial_entity->$id_key]->{'role_rids'})) {
-          if (!is_array($return[$entity_type][$partial_entity->$id_key]->{'role_rids'})) {
-            $return[$entity_type][$partial_entity->$id_key]->{'roles'}[$return[$entity_type][$partial_entity->$id_key]->{'role_rids'}] = $return[$entity_type][$partial_entity->$id_key]->{'role_names'};
-          }
-          else {
-            foreach ($return[$entity_type][$partial_entity->$id_key]->{'role_rids'} as $k => $v) {
-              $return[$entity_type][$partial_entity->$id_key]->{'roles'}[$v] = $return[$entity_type][$partial_entity->$id_key]->{'role_names'}[$k];
-            }
-          }
-        }
-      }
-      $this->ordered_results[] = $partial_entity;
+      $this->ordered_results[$partial_entity->$id_key][] = $partial_entity;
     }
+
+    // Remove duplicates.
+    if (!empty($base_columns) && !empty($this->ordered_results)) {
+      foreach ($this->ordered_results as $k => $data) {
+        if (count($data) == 1) {
+          continue;
+        }
+        $values = array();
+        $eids = array();
+        foreach ($data as $eid => $partial_entity) {
+          foreach ($partial_entity as $key => $value) {
+            $values[$key][$value] = $value;
+          }
+          if ($eid > 0) {
+            $eids[] = $eid;
+          }
+        }
+        foreach ($values as $key => $values) {
+          if (count($values) == 1 && !in_array($key, $base_columns)) {
+            foreach ($eids as $eid) {
+              if (isset($this->ordered_results[$k][$eid]->{$key})) {
+                unset($this->ordered_results[$k][$eid]->{$key});
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Run the query and iterate over each result returned.
+    if (!empty($this->ordered_results)) {
+      foreach ($this->ordered_results as $x => $data) {
+        foreach ($data as $y => $partial_entity) {
+          $bundle = isset($partial_entity->bundle) ? $partial_entity->bundle : $this->bundle;
+          $entity_type = isset($partial_entity->entity_type) ? $partial_entity->entity_type : $this->entity_type;
+          $partial_entity->entity_id = isset($partial_entity->entity_id) ? $partial_entity->entity_id : $partial_entity->$id_key;
+          $revision_id = isset($partial_entity->revision_id) ? $partial_entity->revision_id : NULL;
+          $entity = entity_create_stub_entity($entity_type, array($partial_entity->entity_id, $revision_id, $bundle));
+          // Add in the additional fields to the entity stub.
+          foreach ($partial_entity as $key => $value) {
+            $entity->{$key} = $value;
+          }
+
+          foreach ($columns as $column_name) {
+            if (!isset($partial_entity->{$column_name})) {
+              $entity->{$column_name} = NULL;
+            }
+          }
+          if (!isset($return[$entity_type][$partial_entity->$id_key])) {
+            $return[$entity_type][$partial_entity->$id_key] = $entity;
+          }
+          else {
+            // Handle multiple delta values.
+            foreach ($entity as $k => $v) {
+              // Special case roles.
+              if ($k == 'roles' || is_null($v)) {
+                continue;
+              }
+              if ((!empty($base_columns) && !in_array($k, $base_columns)) || $return[$entity_type][$partial_entity->$id_key]->$k != $v) {
+                if (!is_array($return[$entity_type][$partial_entity->$id_key]->$k)) {
+                  $temp = $return[$entity_type][$partial_entity->$id_key]->$k;
+                  unset($return[$entity_type][$partial_entity->$id_key]->$k);
+                  $return[$entity_type][$partial_entity->$id_key]->{$k} = array($temp);
+                }
+                $return[$entity_type][$partial_entity->$id_key]->{$k}[] = $v;
+              }
+            }
+          }
+          // Handle roles.
+          if (isset($this->addedProperties['roles'])) {
+            // Add in core default roles.
+            if (isset($return[$entity_type][$partial_entity->$id_key]->{'uid'})) {
+              if ($return[$entity_type][$partial_entity->$id_key]->{'uid'}) {
+                $return[$entity_type][$partial_entity->$id_key]->{'roles'}[DRUPAL_AUTHENTICATED_RID] = 'authenticated user';
+              }
+              else {
+                $return[$entity_type][$partial_entity->$id_key]->{'role_names'}[DRUPAL_ANONYMOUS_RID] = 'anonymous user';
+              }
+            }
+
+            // Add in set roles.
+            if (!empty($return[$entity_type][$partial_entity->$id_key]->{'role_names'}) && !empty($return[$entity_type][$partial_entity->$id_key]->{'role_rids'})) {
+              if (!is_array($return[$entity_type][$partial_entity->$id_key]->{'role_rids'})) {
+                $return[$entity_type][$partial_entity->$id_key]->{'roles'}[$return[$entity_type][$partial_entity->$id_key]->{'role_rids'}] = $return[$entity_type][$partial_entity->$id_key]->{'role_names'};
+              }
+              else {
+                foreach ($return[$entity_type][$partial_entity->$id_key]->{'role_rids'} as $k => $v) {
+                  $return[$entity_type][$partial_entity->$id_key]->{'roles'}[$v] = $return[$entity_type][$partial_entity->$id_key]->{'role_names'}[$k];
+                }
+              }
+            }
+          }
+        }
+      }
+
+      if ($this->remove_ordered_results) {
+        unset($this->ordered_results);
+      }
+    }
+
     return $return;
   }
 
