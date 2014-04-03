@@ -91,12 +91,16 @@ class EntityFieldQueryExtra_views_handler_field_field extends views_handler_fiel
         if (strpos($row_id, 'field_data_field_') === FALSE) {
           continue;
         }
-        $pos = strrpos($row_id, "_${value}_entity_type");
+        $pos = strrpos($row_id, "_${value}_");
         if ($pos === FALSE) {
           continue;
         }
+        $entity_lut = EFQE_entity_lut($value);
+        if (empty($entity_lut)) {
+          continue;
+        }
 
-        // Add in requested field.
+        // Extract field name from key.
         $field_name = substr($row_id, 11, $pos - 11);
         // Skip if this was already added.
         if (array_key_exists($entity_type, $fields_by_type) && array_key_exists($field_name, $fields_by_type[$entity_type])) {
@@ -123,7 +127,7 @@ class EntityFieldQueryExtra_views_handler_field_field extends views_handler_fiel
         $entities = array();
         $entity_lut = EFQE_entity_lut($entity_type);
 
-        if (!empty($entity_lut['id'])) {
+        if (!empty($entity_lut['id']) && !empty($fields_by_type)) {
           $query = new EntityFieldQueryExtra();
           $query
             ->entityCondition('entity_type', $entity_lut['type'])
