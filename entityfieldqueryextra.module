@@ -127,27 +127,46 @@ class EntityFieldQueryExtra_views_handler_field_field extends views_handler_fiel
         $entities = array();
         $entity_lut = EFQE_entity_lut($entity_type);
 
-        if (!empty($entity_lut['id']) && !empty($fields_by_type)) {
-          $query = new EntityFieldQueryExtra();
-          $query
-            ->entityCondition('entity_type', $entity_lut['type'])
-            ->propertyCondition($entity_lut['id'], $entity_ids)
-            ->addTag('DANGEROUS_ACCESS_CHECK_OPT_OUT');
+        if (!empty($entity_lut['id']) && !empty($fields_by_type[$entity_lut['type']])) {
+          $cardinality_count = array('1' => 0, '-1' => 0, '1+' => 0);
           foreach ($fields_by_type[$entity_lut['type']] as $field) {
-            // Only add in the field if it is appart of this entity type.
+            // Dealing with high cardinality is difficult.
             $field_info = field_info_field($field);
-            if (!empty($field_info['bundles'][$entity_lut['type']])) {
-              $query->getFieldValue($field, '#ALL');
+            if ($field_info['cardinality'] == 1) {
+              $cardinality_count['1']++;
+              continue;
+            }
+            elseif ($field_info['cardinality'] == -1) {
+              $cardinality_count['-1']++;
+              continue;
+            }
+            else {
+              $cardinality_count['1+']++;
             }
           }
-          // Add in all base properties for this entity type.
-          foreach ($entity_lut['schema_fields_sql']['base table'] as $column) {
-            if (!array_key_exists($column, $query->addedProperties)) {
-              $query->getPropertyValue($column);
+
+          if ($cardinality_count['1+'] == 0 && $cardinality_count['-1'] <= 1) {
+            $query = new EntityFieldQueryExtra();
+            $query
+              ->entityCondition('entity_type', $entity_lut['type'])
+              ->propertyCondition($entity_lut['id'], $entity_ids)
+              ->addTag('DANGEROUS_ACCESS_CHECK_OPT_OUT');
+            foreach ($fields_by_type[$entity_lut['type']] as $field) {
+              // Only add in the field if it is appart of this entity type.
+              $field_info = field_info_field($field);
+              if (!empty($field_info['bundles'][$entity_lut['type']])) {
+                $query->getFieldValue($field, '#ALL');
+              }
             }
+            // Add in all base properties for this entity type.
+            foreach ($entity_lut['schema_fields_sql']['base table'] as $column) {
+              if (!array_key_exists($column, $query->addedProperties)) {
+                $query->getPropertyValue($column);
+              }
+            }
+            $results = $query->executeEntityBuild();
+            $entities = $results[$entity_lut['name']];
           }
-          $results = $query->executeEntityBuild();
-          $entities = $results[$entity_lut['name']];
         }
         // Fallback to entity_load if EFQE failed.
         if (empty($entities)) {
