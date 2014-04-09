@@ -704,7 +704,7 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
 
     $results = $this->execute();
     $eid = array_keys($results[$entity_lut['type']]);
-    $results[$entity_lut['name']] = entity_load($i, $eid);
+    $results[$entity_lut['name']] = entity_load($entity_lut['type'], $eid);
 
     return $results;
   }
