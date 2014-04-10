@@ -359,7 +359,12 @@ function EFQE_entity_lut($e_type = '', $b_table = '', $e_id = '') {
 
   // Return the values.
   if (!empty($e_type)) {
-    return $lut[$e_type];
+    if (!empty($lut[$e_type])) {
+      return $lut[$e_type];
+    }
+    else {
+      return array();
+    }
   }
   if (!empty($b_table)) {
     foreach ($lut as $values) {
