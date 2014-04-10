@@ -88,7 +88,7 @@ class EntityFieldQueryExtra_views_handler_field_field extends views_handler_fiel
         $entities_by_type[$entity_type][$key] = array($entity_id, $revision_id);
       }
       foreach ($object as $row_id => $value) {
-        if (strpos($row_id, 'field_data_field_') === FALSE) {
+        if (strpos($row_id, 'field_data_') === FALSE) {
           continue;
         }
         $pos = strrpos($row_id, "_${value}_");
