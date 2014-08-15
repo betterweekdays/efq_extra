@@ -99,6 +99,9 @@ class EntityFieldQueryExtra_views_handler_field_field extends views_handler_fiel
         if (empty($entity_lut)) {
           continue;
         }
+        if ($entity_lut['type'] != $entity_type) {
+          continue;
+        }
 
         // Extract field name from key.
         $field_name = substr($row_id, 11, $pos - 11);
@@ -164,7 +167,7 @@ class EntityFieldQueryExtra_views_handler_field_field extends views_handler_fiel
                 $query->getPropertyValue($column);
               }
             }
-            $results = $query->executeEntityBuild();
+            $results = $query->executeEntityBuild(TRUE);
             $entities = $results[$entity_lut['name']];
           }
         }
@@ -605,7 +608,7 @@ function EntityFieldQueryExtra_get_args_values($property_condition, $key) {
   return $return;
 }
 
-function EntityFieldQueryExtra_entity_create($values, $field_names, $entity_lut) {
+function EntityFieldQueryExtra_entity_create($values, $field_names, $entity_lut, $remove_non_bundles = FALSE) {
   $object = new stdClass();
   foreach ($values as $k => $v) {
     if (!array_key_exists($k, $field_names)) {
@@ -629,6 +632,20 @@ function EntityFieldQueryExtra_entity_create($values, $field_names, $entity_lut)
 
   // Remove empty fields.
   EntityFieldQueryExtra_entity_create_kill_null($object, $values, $field_names);
+
+
+  // Remove fields that don't belong in this bundle type.
+  if ($remove_non_bundles && isset($object->{$entity_lut['bundle']})) {
+    foreach ($field_names as $data) {
+      if (!isset($object->$data[0]) || !empty($object->$data[0])) {
+        continue;
+      }
+      $field_info = field_info_field($data[0]);
+      if (!in_array($object->{$entity_lut['bundle']}, $field_info['bundles'][$entity_lut['type']])) {
+        unset($object->$data[0]);
+      }
+    }
+  }
 
   // unserialize data if it has been serialized.
   if (isset($object->{'data'})) {
@@ -781,7 +798,7 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
     return $this->executeEntityBuild();
   }
 
-  public function executeEntityBuild() {
+  public function executeEntityBuild($strict = FALSE) {
     if (isset($this->entityConditions['entity_type']['value'])) {
       $entity_type = $this->entityConditions['entity_type']['value'];
     }
@@ -805,7 +822,7 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
     $results[$entity_lut['name']] = array();
     if (!empty($results[$entity_lut['type']])) {
       foreach($results[$entity_lut['type']] as $id => $values) {
-        $results[$entity_lut['name']][$id] = EntityFieldQueryExtra_entity_create($values, $this->fields_to_entity, $entity_lut);
+        $results[$entity_lut['name']][$id] = EntityFieldQueryExtra_entity_create($values, $this->fields_to_entity, $entity_lut, $strict);
       }
     }
     return $results;
@@ -1252,7 +1269,9 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
       $conditions[$table['alias']] = array();
       if (!empty($table['condition'])) {
         foreach ($aliases as $a) {
-          if (strpos($table['condition'], $a) !== FALSE) {
+          // Table alias must have a space or = preceding it for it to be a
+          // valid condition.
+          if (strpos($table['condition'], ' ' . $a) !== FALSE || strpos($table['condition'], '=' . $a) !== FALSE) {
             $conditions[$table['alias']][] = $a;
           }
         }
