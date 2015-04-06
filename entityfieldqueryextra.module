@@ -57,7 +57,7 @@ class EntityFieldQueryExtra_views_handler_field_field extends views_handler_fiel
    */
   function post_execute(&$values) {
     // Uncomment this line to disable EFQE Views.
-//     return views_handler_field_field::post_execute($values);
+     //return views_handler_field_field::post_execute($values);
 
     // Do nothing if $values is empty
     if (empty($values)) {
@@ -88,7 +88,7 @@ class EntityFieldQueryExtra_views_handler_field_field extends views_handler_fiel
         $entities_by_type[$entity_type][$key] = array($entity_id, $revision_id);
       }
       foreach ($object as $row_id => $value) {
-        if (strpos($row_id, 'field_data_') === FALSE) {
+        if (empty($value) || strpos($row_id, 'field_data_') === FALSE) {
           continue;
         }
         $pos = strrpos($row_id, "_${value}_");
@@ -96,10 +96,10 @@ class EntityFieldQueryExtra_views_handler_field_field extends views_handler_fiel
           continue;
         }
         $entity_lut = EFQE_entity_lut($value);
-        if (empty($entity_lut)) {
-          continue;
-        }
-        if ($entity_lut['type'] != $entity_type) {
+        if ( empty($entity_lut)
+          || empty($entity_lut['type'])
+          || $entity_lut['type'] != $entity_type
+        ) {
           continue;
         }
 
@@ -731,7 +731,7 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
     return $results;
   }
 
-  public function executeEntityBuildAll() {
+  public function executeEntityBuildAll($check_tables = FALSE) {
     // Get entity and bundle name.
     $entity_type = NULL;
     $bundle_name = NULL;
@@ -787,6 +787,11 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
     }
 
     foreach ($field_output as $field_name => $columns) {
+      if ($check_tables) {
+        if (!db_table_exists('field_data_' . $field_name)) {
+          continue;
+        }
+      }
       foreach ($columns as $column) {
         if (!array_key_exists($field_name . '_' . $column, $this->addedFields)) {
           $this->getFieldValue($field_name, $column, 'LEFT');
@@ -796,6 +801,78 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
 
     // Run the query.
     return $this->executeEntityBuild();
+  }
+
+  public function executeAll($check_tables = FALSE) {
+    // Get entity and bundle name.
+    $entity_type = NULL;
+    $bundle_name = NULL;
+    if (isset($this->entityConditions['entity_type']['value'])) {
+      $entity_type = $this->entityConditions['entity_type']['value'];
+      if (isset($this->entityConditions['bundle']['value'])) {
+        $bundle_name = $this->entityConditions['bundle']['value'];
+      }
+    }
+
+    // Get all Properties.
+    $entity_info = entity_get_info($entity_type);
+    $properties = $entity_info['schema_fields_sql']['base table'];
+    foreach ($properties as $column) {
+      if (!array_key_exists($column, $this->addedProperties)) {
+        $this->getPropertyValue($column);
+      }
+    }
+
+    // Get user roles if base table has a uid.
+    if (in_array('uid', $properties)) {
+      $this->getPropertyValue('roles');
+    }
+
+    // Get all fields.
+    $fields_info = field_info_instances($entity_type, $bundle_name);
+    $field_output = array();
+    if (is_null($bundle_name)) {
+      if (isset($fields_info[$entity_type])) {
+        foreach ($fields_info[$entity_type] as $field_name => $value) {
+          $field_info = field_info_field($field_name);
+          $output = reset($field_info['storage']['details']['sql']['FIELD_LOAD_CURRENT']);
+          $field_output[$field_name] = array_keys($output);
+        }
+      }
+      else {
+        // Need to group joins into a select join by $bundle_name in order to avoid the 61 table limit.
+        foreach ($fields_info as $bundle_name => $bundle_fields) {
+          foreach ($bundle_fields as $field_name => $value) {
+            $field_info = field_info_field($field_name);
+            $output = reset($field_info['storage']['details']['sql']['FIELD_LOAD_CURRENT']);
+            $field_output[$field_name] = array_keys($output);
+          }
+        }
+      }
+    }
+    else {
+      foreach ($fields_info as $field_name => $value) {
+        $field_info = field_info_field($field_name);
+        $output = reset($field_info['storage']['details']['sql']['FIELD_LOAD_CURRENT']);
+        $field_output[$field_name] = array_keys($output);
+      }
+    }
+
+    foreach ($field_output as $field_name => $columns) {
+      if ($check_tables) {
+        if (!db_table_exists('field_data_' . $field_name)) {
+          continue;
+        }
+      }
+      foreach ($columns as $column) {
+        if (!array_key_exists($field_name . '_' . $column, $this->addedFields)) {
+          $this->getFieldValue($field_name, $column, 'LEFT');
+        }
+      }
+    }
+
+    // Run the query.
+    return $this->execute();
   }
 
   public function executeEntityBuild($strict = FALSE) {
@@ -1584,4 +1661,35 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
 
     return $string;
   }
+}
+
+function efqe_gqs(SelectQueryInterface $query) {
+  $string = (string) $query;
+  $arguments = $query->arguments();
+
+  // Convert to regular SQL Syntax
+  if (!empty($arguments) && is_array($arguments)) {
+    foreach ($arguments as $placeholder => &$value) {
+      if (is_string($value)) {
+        $value = "'$value'";
+      }
+    }
+    $string = strtr($string, $arguments);
+    $string = str_replace(array(' {', '} ', "\n{", "}\n"), ' ', $string);
+  }
+  // Pretty print SQL.
+  if (!class_exists('SqlFormatter')) {
+    // Make the SqlFormatter class available.
+    module_load_include('php', 'entityfieldqueryextra', 'sql_formatter/SqlFormatter');
+  }
+  if (!class_exists('SqlFormatter')) {
+    $string = str_replace(', ', ",\n  ", $string);
+    $string = str_replace(' AND ', "\n  AND ", $string);
+  }
+  else {
+    $string = SqlFormatter::format($string, false) . "\n\n";
+  }
+  $string = str_replace(' ON ', "\n  ON ", $string);
+
+  return $string;
 }
