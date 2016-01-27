@@ -725,8 +725,10 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
     $entity_lut = EFQE_entity_lut($entity_type);
 
     $results = $this->execute();
-    $eid = array_keys($results[$entity_lut['type']]);
-    $results[$entity_lut['name']] = entity_load($entity_lut['type'], $eid);
+    if (!empty($results) && !empty($results[$entity_lut['type']])) {
+      $eid = array_keys($results[$entity_lut['type']]);
+      $results[$entity_lut['name']] = entity_load($entity_lut['type'], $eid);
+    }
 
     return $results;
   }
