@@ -488,7 +488,7 @@ function EntityFieldQueryExtra_field_sql_storage_field_storage_query(EntityField
     }
   }
 
-  if ($query->propertyConditions || $has_property_order) {
+  if ($query->propertyConditions || $query->addedProperties || $has_property_order) {
     if (empty($query->entityConditions['entity_type']['value'])) {
       throw new EntityFieldQueryException('Property conditions and orders must have an entity type defined.');
     }
@@ -950,6 +950,10 @@ class EntityFieldQueryExtra extends EntityFieldQuery {
           break;
         }
       }
+    }
+
+    if ($this->addedProperties && empty($this->propertyConditions)) {
+      $this->executeCallback = 'EntityFieldQueryExtra_field_sql_storage_field_storage_query';
     }
 
     return parent::execute();
