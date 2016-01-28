@@ -676,7 +676,7 @@ function EntityFieldQueryExtra_entity_create($values, $field_names, $entity_lut,
 
 function EntityFieldQueryExtra_entity_create_kill_null(&$object) {
   foreach ($object as $key => $values) {
-    if (!isset($values['und'])) {
+    if (!isset($values['und']) || !is_array($values['und'])) {
       continue;
     }
     $all_null = TRUE;
