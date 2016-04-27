@@ -637,7 +637,7 @@ function EntityFieldQueryExtra_entity_create($values, $field_names, $entity_lut,
   // Remove fields that don't belong in this bundle type.
   if ($remove_non_bundles && isset($object->{$entity_lut['bundle']})) {
     foreach ($field_names as $data) {
-      if (!isset($object->$data[0]) || !empty($object->$data[0])) {
+      if (!isset($object->{$data[0]}) || !empty($object->{$data[0]})) {
         continue;
       }
       $field_info = field_info_field($data[0]);
