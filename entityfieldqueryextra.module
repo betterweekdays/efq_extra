@@ -642,7 +642,7 @@ function EntityFieldQueryExtra_entity_create($values, $field_names, $entity_lut,
       }
       $field_info = field_info_field($data[0]);
       if (!in_array($object->{$entity_lut['bundle']}, $field_info['bundles'][$entity_lut['type']])) {
-        unset($object->$data[0]);
+        unset($object->{$data[0]});
       }
     }
   }
@@ -666,7 +666,7 @@ function EntityFieldQueryExtra_entity_create($values, $field_names, $entity_lut,
         $object->{$rule['new_key']} = call_user_func_array($rule['function'], $args);
       }
       else {
-        $object->{$rule['new_key']} = $object->$rule['old_key'];
+        $object->{$rule['new_key']} = $object->{$rule['old_key']};
       }
     }
   }
