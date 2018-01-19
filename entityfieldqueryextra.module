@@ -379,7 +379,7 @@ function EFQE_entity_lut($e_type = '', $b_table = '', $e_id = '') {
   }
   if (!empty($e_id)) {
     foreach ($lut as $values) {
-      if ($values['id'] == $e_id) {
+      if (!empty($values['id']) && $values['id'] == $e_id) {
         return $values;
       }
     }
